@@ -30,10 +30,16 @@ from budget_app.app.helper_functions import (
     generate_month_options,
     get_fixed_expenses,
     upsert_fixed_expense,
+    deactivate_fixed_expense,
+    get_income_sources,
+    upsert_income_source,
+    deactivate_income_source,
     upsert_objective,
     has_fixed_expenses,
+    has_income_sources,
     has_objectives,
     preview_fixed_expenses_for_month,
+    preview_income_for_month,
     get_transactions_for_month,
     get_variable_by_payment_method,
     get_oldest_open_month,
@@ -245,6 +251,9 @@ if "objectives_saved" not in st.session_state:
 if "editing_fx" not in st.session_state:
     st.session_state.editing_fx = None
 
+if "editing_income" not in st.session_state:
+    st.session_state.editing_income = None
+
 if "confirm_close_month_for" not in st.session_state:
     st.session_state.confirm_close_month_for = None
 
@@ -308,6 +317,19 @@ with dashboard_tab:
             st.info("No fixed expenses defined yet.")
         
         st.divider()
+        st.markdown("**Income sources that will apply:**")
+        income_preview, _ = preview_income_for_month(selected_month)
+
+        if income_preview:
+            for inc in income_preview:
+                c1, c2, c3 = st.columns([2, 4, 2])
+                c1.write(inc["date"].strftime("%Y-%m-%d"))
+                c2.write(f"{inc['name']} ({inc['subcategory'] or '—'})")
+                c3.write(f"${inc['amount']:,.2f}")
+        else:
+            st.info("No income sources defined yet.")
+
+        st.divider()
         st.markdown("**Budget objectives that will apply**")
 
         objectives = get_active_objectives()
@@ -324,6 +346,9 @@ with dashboard_tab:
 
         if not has_fixed_expenses():
             missing_setup.append("fixed expenses")
+
+        if not has_income_sources():
+            missing_setup.append("income sources")
 
         if not has_objectives():
             missing_setup.append("budget objectives")
@@ -726,15 +751,23 @@ with trx_tab:
 # ======================================================
 
 with settings_tab:
+    can_delete_for_selected_month = not month_exists(selected_month)
     st.info(
         "Start here 👋\n\n"
         "1. Define your fixed expenses\n"
-        "2. Set your budget objectives\n"
-        "3. Then initialize your first month from the Dashboard"
+        "2. Add your income sources\n"
+        "3. Set your budget objectives\n"
+        "4. Then initialize your first month from the Dashboard"
     )
+    if not can_delete_for_selected_month:
+        st.warning(
+            f"Month {selected_month} is already initialized. "
+            "Fixed expenses and income sources can only be deleted "
+            "before initializing the selected month."
+        )
 
-    fixed_tab, objectives_tab = st.tabs(
-        ["Fixed Expenses", "Budget Objectives"]
+    fixed_tab, income_tab, objectives_tab = st.tabs(
+        ["Fixed Expenses", "Income", "Budget Objectives"]
     )
 
     # ---------------- Fixed expenses ----------------
@@ -748,7 +781,7 @@ with settings_tab:
         expenses = get_fixed_expenses()
 
         for fx in expenses:
-            c1, c2, c3, c4, c5 = st.columns([3, 2, 2, 2, 1])
+            c1, c2, c3, c4, c5, c6 = st.columns([3, 2, 2, 2, 1, 1])
             c1.write(fx["name"])
             c2.write(f"${fx['amount']:,.2f}")
             c3.write(f"Day {fx['due_day']}")
@@ -756,6 +789,15 @@ with settings_tab:
             if fx["active"]:
                 if c5.button("Edit", key=f"edit_{fx['id']}"):
                     st.session_state.editing_fx = dict(fx)
+                if c6.button(
+                    "Delete",
+                    key=f"delete_{fx['id']}",
+                    disabled=not can_delete_for_selected_month,
+                ):
+                    deactivate_fixed_expense(fx["id"])
+                    st.session_state.editing_fx = None
+                    st.success("Fixed expense deleted.")
+                    st.rerun()
 
         st.divider()
         st.markdown("#### Add / Edit Fixed Expense")
@@ -782,6 +824,62 @@ with settings_tab:
                 upsert_fixed_expense(name, amount, due_day, subcategory or None)
                 st.session_state.editing_fx = None
                 st.success("Fixed expense saved.")
+                st.rerun()
+
+    # ---------------- Income ----------------
+    with income_tab:
+        st.markdown("### Income")
+        st.info(
+            "Income sources apply to future months only. "
+            "They are copied as transactions when a month is initialized."
+        )
+
+        incomes = get_income_sources()
+
+        for inc in incomes:
+            c1, c2, c3, c4, c5, c6 = st.columns([3, 2, 2, 2, 1, 1])
+            c1.write(inc["name"])
+            c2.write(f"${inc['amount']:,.2f}")
+            c3.write(f"Day {inc['due_day']}")
+            c4.write(inc["subcategory"] or "")
+            if inc["active"]:
+                if c5.button("Edit", key=f"edit_income_{inc['id']}"):
+                    st.session_state.editing_income = dict(inc)
+                if c6.button(
+                    "Delete",
+                    key=f"delete_income_{inc['id']}",
+                    disabled=not can_delete_for_selected_month,
+                ):
+                    deactivate_income_source(inc["id"])
+                    st.session_state.editing_income = None
+                    st.success("Income source deleted.")
+                    st.rerun()
+
+        st.divider()
+        st.markdown("#### Add / Edit Income Source")
+
+        inc = st.session_state.editing_income or {}
+
+        with st.form("income_form"):
+            name = st.text_input("Name", value=inc.get("name", ""))
+            amount = st.number_input(
+                "Amount", min_value=0.0, step=1.0, value=inc.get("amount", 0.0)
+            )
+            due_day = st.number_input(
+                "Due day (1–31)", min_value=1, max_value=31, value=inc.get("due_day", 1)
+            )
+            subcategory = st.text_input(
+                "Subcategory", value=inc.get("subcategory", "") or ""
+            )
+            submitted = st.form_submit_button("Save")
+
+        if submitted:
+            if not name or amount <= 0:
+                st.error("Name and amount are required.")
+            else:
+                upsert_income_source(name, amount, due_day, subcategory or None)
+                st.session_state.editing_income = None
+                st.success("Income source saved.")
                 st.rerun()
 
     # ---------------- Objectives ----------------

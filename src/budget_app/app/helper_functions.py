@@ -218,6 +218,74 @@ def upsert_fixed_expense(name, amount, due_day, subcategory):
     conn.close()
 
 
+def deactivate_fixed_expense(expense_id: int) -> None:
+    conn = get_connection()
+    conn.execute(
+        """
+        UPDATE fixed_expenses
+        SET active = 0
+        WHERE id = ?
+        """,
+        (expense_id,),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_income_sources():
+    conn = get_connection()
+    rows = conn.execute(
+        """
+        SELECT id, name, amount, due_day, subcategory, active
+        FROM income_sources
+        WHERE active = 1
+        ORDER BY due_day
+        """
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def upsert_income_source(name, amount, due_day, subcategory):
+    conn = get_connection()
+
+    conn.execute(
+        """
+        UPDATE income_sources
+        SET active = 0
+        WHERE name = ?
+          AND COALESCE(subcategory, '') = COALESCE(?, '')
+          AND active = 1
+        """,
+        (name, subcategory),
+    )
+
+    conn.execute(
+        """
+        INSERT INTO income_sources (name, amount, due_day, category, subcategory)
+        VALUES (?, ?, ?, 'Income', ?)
+        """,
+        (name, amount, due_day, subcategory),
+    )
+
+    conn.commit()
+    conn.close()
+
+
+def deactivate_income_source(income_id: int) -> None:
+    conn = get_connection()
+    conn.execute(
+        """
+        UPDATE income_sources
+        SET active = 0
+        WHERE id = ?
+        """,
+        (income_id,),
+    )
+    conn.commit()
+    conn.close()
+
+
 def upsert_objective(category: str, percentage: float):
     conn = get_connection()
 
@@ -263,6 +331,15 @@ def has_objectives() -> bool:
     return row is not None
 
 
+def has_income_sources() -> bool:
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT 1 FROM income_sources WHERE active = 1 LIMIT 1"
+    ).fetchone()
+    conn.close()
+    return row is not None
+
+
 def preview_fixed_expenses_for_month(month_id: str):
     """
     Returns a list of dicts with:
@@ -297,6 +374,45 @@ def preview_fixed_expenses_for_month(month_id: str):
                 "date": tx_date,
                 "name": fx["name"],
                 "subcategory": fx["subcategory"],
+                "amount": amount,
+            }
+        )
+
+    return preview, total
+
+
+def preview_income_for_month(month_id: str):
+    """
+    Returns a list of dicts with:
+    - date
+    - name
+    - subcategory
+    - amount (positive)
+    """
+    year, month = map(int, month_id.split("-"))
+    incomes = get_income_sources()
+
+    preview = []
+    total = 0.0
+
+    for inc in incomes:
+        due_day = inc["due_day"]
+
+        # Clamp day to last day of month (safety)
+        try:
+            tx_date = date(year, month, due_day)
+        except ValueError:
+            last_day = (date(year, month, 1) + relativedelta(months=1, days=-1)).day
+            tx_date = date(year, month, last_day)
+
+        amount = abs(inc["amount"])
+        total += amount
+
+        preview.append(
+            {
+                "date": tx_date,
+                "name": inc["name"],
+                "subcategory": inc["subcategory"],
                 "amount": amount,
             }
         )
@@ -355,4 +471,3 @@ def get_oldest_open_month() -> str | None:
     ).fetchone()
     conn.close()
     return row["month_id"] if row else None
-
