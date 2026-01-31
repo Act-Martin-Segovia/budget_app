@@ -1,0 +1,47 @@
+# Sobio Budget Planner
+
+A local-first personal budget app built with Streamlit and SQLite. Track income and spending by month, plan fixed expenses, set allocation objectives, and close out months once reconciled.
+
+## Features
+- Month-based budgeting with open/closed month lifecycle
+- Fixed expenses that auto-apply when a month is initialized
+- Budget objectives (fixed, variable, savings) as % of income
+- Transaction entry with categories, subcategories, and payment method
+- Monthly summaries and category rollups
+
+## Tech stack
+- Python 3.11+
+- Streamlit UI
+- SQLite database stored locally
+
+## Quick start
+
+### Option A: Makefile (recommended)
+```
+make setup
+make run
+```
+
+### Option B: pip
+```
+python -m venv .venv
+. .venv/bin/activate
+pip install -e .
+python -m streamlit run src/budget_app/app/main.py
+```
+
+Then open the URL printed by Streamlit (usually http://localhost:8501).
+
+## Data storage
+- Database file: `db/budget.db` (created on first run)
+- Schema: `src/budget_app/sql/schema.sql`
+
+## Development
+- Lint/format:
+```
+make lint
+```
+
+## Notes
+- This app is local-first: all data stays in your `db/` folder.
+- If you want a fresh start, delete `db/budget.db` and re-run the app.
