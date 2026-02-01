@@ -52,7 +52,6 @@ from budget_app.app.helper_functions import (
 # ======================================================
 # App start
 # ======================================================
-
 ASSETS = ROOT / "src" / "assets"
 st.set_page_config(
     page_title="Sobio Budget Planner",
