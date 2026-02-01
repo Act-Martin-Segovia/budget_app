@@ -304,16 +304,26 @@ if "user" not in st.session_state:
 
     st.stop()
 
+db_path = Path("data") / f"{st.session_state.user}.db"
+#init_db(db_path)
 
 with st.sidebar:
     st.caption(f"Signed in as {st.session_state.user}")
+    if db_path.exists():
+        with open(db_path, "rb") as f:
+            st.download_button(
+                "Download data backup",
+                data=f.read(),
+                file_name=(
+                    f"budget_app_{st.session_state.user}_"
+                    f"{date.today().isoformat()}.db"
+                ),
+                mime="application/x-sqlite3",
+            )
     if st.button("Log out"):
         st.session_state.pop("user", None)
         st.session_state.pop("db_initialized", None)
         st.rerun()
-
-db_path = Path("data") / f"{st.session_state.user}.db"
-#init_db(db_path)
 
 if "db_initialized" not in st.session_state:
     init_db(db_path)
@@ -485,7 +495,6 @@ with dashboard_tab:
             """,
             unsafe_allow_html=True,
         )
-
         net_class = "bad" if snapshot["net"] < 0 else "good"
         ending_class = "bad" if snapshot["projected_ending"] < 0 else "good"
         
