@@ -1,5 +1,5 @@
-import sys
-from pathlib import Path
+import sqlite3
+import tempfile
 from datetime import date
 from dateutil.relativedelta import relativedelta
 
@@ -461,3 +461,16 @@ def get_oldest_open_month() -> str | None:
     ).fetchone()
     conn.close()
     return row["month_id"] if row else None
+
+
+def is_valid_sqlite_db(file_bytes: bytes) -> bool:
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".db") as tmp:
+            tmp.write(file_bytes)
+            tmp.flush()
+            conn = sqlite3.connect(tmp.name)
+            conn.execute("SELECT name FROM sqlite_master LIMIT 1;")
+            conn.close()
+        return True
+    except Exception:
+        return False

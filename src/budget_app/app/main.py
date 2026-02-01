@@ -49,6 +49,7 @@ from budget_app.app.helper_functions import (
     get_transactions_for_month,
     get_variable_by_payment_method,
     get_oldest_open_month,
+    is_valid_sqlite_db,
 )
 
 # ======================================================
@@ -344,8 +345,8 @@ if "editing_income" not in st.session_state:
 if "confirm_close_month_for" not in st.session_state:
     st.session_state.confirm_close_month_for = None
 
-dashboard_tab, trx_tab, settings_tab = st.tabs(
-    ["📊 Main Dashboard", "📋 Trx Details", "⚙️ Settings"]
+dashboard_tab, trx_tab, settings_tab, backup_data_tab = st.tabs(
+    ["📊 Main Dashboard", "📋 Trx Details", "⚙️ Settings", "💾 Restore Backup Data"]
 )
 
 # ======================================================
@@ -819,8 +820,6 @@ with dashboard_tab:
                     st.info("Month closure cancelled.")
                     st.rerun()
 
-
-
 # ======================================================
 # TRX DETAILS TAB
 # ======================================================
@@ -1036,3 +1035,63 @@ with settings_tab:
 
                 st.session_state.objectives_saved = True
                 st.rerun()
+
+# ======================================================
+# Restore Backup TAB
+# ======================================================
+with backup_data_tab:
+    if st.session_state.get("backup_restored"):
+        st.success("Backup restored successfully.")
+        st.session_state.pop("backup_restored", None)
+
+    st.divider()
+    st.markdown("### Restore from backup")
+
+    st.warning(
+        "Uploading a backup will replace your current data. "
+        "This action cannot be undone."
+    )
+
+    uploaded_db = st.file_uploader(
+        "Upload your SBP backup data (.db file)",
+        type=["db"],
+        key="restore_uploader",
+    )
+
+    # ---- Read file ONCE ----
+    if uploaded_db is not None and "uploaded_db_bytes" not in st.session_state:
+        st.session_state.uploaded_db_bytes = uploaded_db.read()
+
+    db_bytes = st.session_state.get("uploaded_db_bytes")
+
+    if db_bytes:
+
+        if not is_valid_sqlite_db(db_bytes):
+            st.error("This file does not appear to be a valid SQLite database.")
+            st.session_state.pop("uploaded_db_bytes", None)
+        else:
+            confirm = st.checkbox(
+                "I understand this will overwrite my current data"
+            )
+
+            restore_clicked = st.button(
+                "Restore backup",
+                disabled=not confirm,
+                type="primary",
+            )
+
+            if restore_clicked:
+                user_db_path = Path("data") / f"{st.session_state.user}.db"
+                user_db_path.parent.mkdir(parents=True, exist_ok=True)
+
+                with open(user_db_path, "wb") as f:
+                    f.write(db_bytes)
+
+                st.session_state.pop("uploaded_db_bytes", None)
+                st.session_state.pop("restore_uploader", None)
+                st.session_state.backup_restored = True
+
+                st.rerun()
+
+
+
