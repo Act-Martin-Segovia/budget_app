@@ -10,8 +10,10 @@ import bcrypt
 ROOT = Path(__file__).resolve()
 while not (ROOT / ".git").exists() and ROOT != ROOT.parent:
     ROOT = ROOT.parent
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+SRC_ROOT = ROOT / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
+
 
 from budget_app.db.db import (
     add_transaction,
@@ -281,21 +283,24 @@ def verify_user(username: str, password: str, users: dict[str, str]) -> bool:
 
 
 if "user" not in st.session_state:
-    st.markdown("## Sign in")
-    with st.form("login_form"):
-        username = st.text_input("Username")
-        password = st.text_input("Password", type="password")
-        submitted = st.form_submit_button("Sign in")
+    login_slot = st.empty()
+    with login_slot:
+        st.markdown("## Sign in")
+        with st.form("login_form"):
+            username = st.text_input("Username")
+            password = st.text_input("Password", type="password")
+            submitted = st.form_submit_button("Sign in")
 
-    if submitted:
-        users = load_user_store()
-        if not users:
-            st.error("No users configured. Add users to st.secrets or users.json.")
-        elif verify_user(username.strip(), password, users):
-            st.session_state.user = username.strip()
-            st.rerun()
-        else:
-            st.error("Invalid username or password.")
+        if submitted:
+            users = load_user_store()
+            if not users:
+                st.error("No users configured. Add users to st.secrets or users.json.")
+            elif verify_user(username.strip(), password, users):
+                st.session_state.user = username.strip()
+                login_slot.empty()
+                st.rerun()
+            else:
+                st.error("Invalid username or password.")
 
     st.stop()
 
@@ -689,44 +694,67 @@ with dashboard_tab:
                 submitted = st.form_submit_button("Add transaction")
 
             if submitted:
-                if not subcategory.strip():
+                category = next(
+                    k for k, v in CATEGORY_LABELS.items() if v == category_label
+                )
+                subcategory = subcategory.strip()
+                selected_year, selected_month_num = map(int, selected_month.split("-"))
+                if (tx_date.year, tx_date.month) != (
+                    selected_year,
+                    selected_month_num,
+                ):
+                    st.error(
+                        "This transaction's date does not match the selected month."
+                    )
+                elif category != "Income" and not subcategory:
                     st.error("Subcategory is required.")
                 elif amount <= 0:
                     st.error("Amount must be greater than zero.")
                 else:
-                    category = next(
-                        k for k, v in CATEGORY_LABELS.items() if v == category_label
-                    )
+                    subcategory = subcategory or None
                     signed_amount = amount if category == "Income" else -amount
 
-                    actual = get_category_actual(selected_month, category)
-                    planned = get_category_planned(selected_month, category)
-                    simulated = actual + amount if category != "Income" else actual
-
-                    if simulated > planned:
-                        st.session_state.pending_tx = {
-                            "date": tx_date.isoformat(),
-                            "month_id": selected_month,
-                            "amount": signed_amount,
-                            "category": category,
-                            "subcategory": subcategory,
-                            "payment_method": payment_method,
-                            "note": note,
-                            "planned": planned,
-                            "simulated": simulated,
-                        }
-                    else:
+                    if category == "Income":
                         add_transaction(
                             date=tx_date.isoformat(),
                             month_id=selected_month,
                             amount=signed_amount,
                             category=category,
                             subcategory=subcategory,
-                            payment_method=payment_method.lower().replace(" ", "_"),
+                            payment_method=None,
                             note=note,
                         )
-                        st.success("Transaction added.")
+                        st.success("Income transaction added.")
                         st.rerun()
+                    else:
+                        actual = get_category_actual(selected_month, category)
+                        planned = get_category_planned(selected_month, category)
+                        simulated = actual + amount
+
+                        if simulated > planned:
+                            st.session_state.pending_tx = {
+                                "date": tx_date.isoformat(),
+                                "month_id": selected_month,
+                                "amount": signed_amount,
+                                "category": category,
+                                "subcategory": subcategory,
+                                "payment_method": payment_method,
+                                "note": note,
+                                "planned": planned,
+                                "simulated": simulated,
+                            }
+                        else:
+                            add_transaction(
+                                date=tx_date.isoformat(),
+                                month_id=selected_month,
+                                amount=signed_amount,
+                                category=category,
+                                subcategory=subcategory,
+                                payment_method=payment_method.lower().replace(" ", "_"),
+                                note=note,
+                            )
+                            st.success("Transaction added.")
+                            st.rerun()
 
             pending = st.session_state.pending_tx
             if pending:
