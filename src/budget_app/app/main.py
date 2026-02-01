@@ -49,6 +49,7 @@ from budget_app.app.helper_functions import (
     get_transactions_for_month,
     get_variable_by_payment_method,
     get_oldest_open_month,
+    is_valid_sqlite_db,
 )
 
 # ======================================================
@@ -304,16 +305,26 @@ if "user" not in st.session_state:
 
     st.stop()
 
+db_path = Path("data") / f"{st.session_state.user}.db"
+#init_db(db_path)
 
 with st.sidebar:
     st.caption(f"Signed in as {st.session_state.user}")
+    if db_path.exists():
+        with open(db_path, "rb") as f:
+            st.download_button(
+                "Download data backup",
+                data=f.read(),
+                file_name=(
+                    f"budget_app_{st.session_state.user}_"
+                    f"{date.today().isoformat()}.db"
+                ),
+                mime="application/x-sqlite3",
+            )
     if st.button("Log out"):
         st.session_state.pop("user", None)
         st.session_state.pop("db_initialized", None)
         st.rerun()
-
-db_path = Path("data") / f"{st.session_state.user}.db"
-#init_db(db_path)
 
 if "db_initialized" not in st.session_state:
     init_db(db_path)
@@ -334,8 +345,8 @@ if "editing_income" not in st.session_state:
 if "confirm_close_month_for" not in st.session_state:
     st.session_state.confirm_close_month_for = None
 
-dashboard_tab, trx_tab, settings_tab = st.tabs(
-    ["📊 Main Dashboard", "📋 Trx Details", "⚙️ Settings"]
+dashboard_tab, trx_tab, settings_tab, backup_data_tab = st.tabs(
+    ["📊 Main Dashboard", "📋 Trx Details", "⚙️ Settings", "💾 Restore Backup Data"]
 )
 
 # ======================================================
@@ -485,7 +496,6 @@ with dashboard_tab:
             """,
             unsafe_allow_html=True,
         )
-
         net_class = "bad" if snapshot["net"] < 0 else "good"
         ending_class = "bad" if snapshot["projected_ending"] < 0 else "good"
         
@@ -810,8 +820,6 @@ with dashboard_tab:
                     st.info("Month closure cancelled.")
                     st.rerun()
 
-
-
 # ======================================================
 # TRX DETAILS TAB
 # ======================================================
@@ -1027,3 +1035,63 @@ with settings_tab:
 
                 st.session_state.objectives_saved = True
                 st.rerun()
+
+# ======================================================
+# Restore Backup TAB
+# ======================================================
+with backup_data_tab:
+    if st.session_state.get("backup_restored"):
+        st.success("Backup restored successfully.")
+        st.session_state.pop("backup_restored", None)
+
+    st.divider()
+    st.markdown("### Restore from backup")
+
+    st.warning(
+        "Uploading a backup will replace your current data. "
+        "This action cannot be undone."
+    )
+
+    uploaded_db = st.file_uploader(
+        "Upload your SBP backup data (.db file)",
+        type=["db"],
+        key="restore_uploader",
+    )
+
+    # ---- Read file ONCE ----
+    if uploaded_db is not None and "uploaded_db_bytes" not in st.session_state:
+        st.session_state.uploaded_db_bytes = uploaded_db.read()
+
+    db_bytes = st.session_state.get("uploaded_db_bytes")
+
+    if db_bytes:
+
+        if not is_valid_sqlite_db(db_bytes):
+            st.error("This file does not appear to be a valid SQLite database.")
+            st.session_state.pop("uploaded_db_bytes", None)
+        else:
+            confirm = st.checkbox(
+                "I understand this will overwrite my current data"
+            )
+
+            restore_clicked = st.button(
+                "Restore backup",
+                disabled=not confirm,
+                type="primary",
+            )
+
+            if restore_clicked:
+                user_db_path = Path("data") / f"{st.session_state.user}.db"
+                user_db_path.parent.mkdir(parents=True, exist_ok=True)
+
+                with open(user_db_path, "wb") as f:
+                    f.write(db_bytes)
+
+                st.session_state.pop("uploaded_db_bytes", None)
+                st.session_state.pop("restore_uploader", None)
+                st.session_state.backup_restored = True
+
+                st.rerun()
+
+
+
