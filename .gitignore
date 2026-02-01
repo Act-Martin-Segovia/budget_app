@@ -1,8 +1,16 @@
-.venv/
-__pycache__/
-*.db
-.env
+# secrets
 .streamlit/secrets.toml
 users.json
+
+# local data
+data/
+*.db
+
+# OS junk
 .DS_Store
 *.egg-info/
+
+# virtual env
+.venv/
+__pycache__/
+.env
