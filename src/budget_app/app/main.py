@@ -309,6 +309,7 @@ with st.sidebar:
     st.caption(f"Signed in as {st.session_state.user}")
     if st.button("Log out"):
         st.session_state.pop("user", None)
+        st.session_state.pop("db_initialized", None)
         st.rerun()
 
 db_path = Path("data") / f"{st.session_state.user}.db"
