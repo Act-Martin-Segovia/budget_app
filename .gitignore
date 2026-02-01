@@ -5,3 +5,4 @@ __pycache__/
 .streamlit/secrets.toml
 users.json
 .DS_Store
+*.egg-info/

@@ -1,2 +1,0 @@
-assets
-budget_app
