@@ -69,6 +69,20 @@ def get_active_fixed_expenses() -> list[sqlite3.Row]:
     return rows
 
 
+def get_active_income_sources() -> list[sqlite3.Row]:
+    conn = get_connection()
+    cur = conn.execute(
+        """
+        SELECT name, amount, due_day, category, subcategory
+        FROM income_sources
+        WHERE active = 1
+        """
+    )
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
 def compute_transaction_date(month_id: str, due_day: int) -> str:
     year, month = map(int, month_id.split("-"))
     last_day = (
@@ -197,6 +211,20 @@ def open_month(month_id: str, starting_balance: float) -> None:
             tx_type="normal",
         )
 
+    # Materialize income sources as transactions
+    for inc in get_active_income_sources():
+        tx_date = compute_transaction_date(month_id, inc["due_day"])
+
+        add_transaction(
+            date=tx_date,
+            month_id=month_id,
+            amount=abs(inc["amount"]),
+            category="Income",
+            subcategory=inc["subcategory"],
+            note=f"Income: {inc['name']}",
+            tx_type="normal",
+        )
+
 
 def close_month(month_id: str) -> float:
     conn = get_connection()
@@ -241,5 +269,4 @@ def close_month(month_id: str) -> float:
     conn.close()
 
     return ending_balance
-
 

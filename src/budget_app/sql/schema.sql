@@ -59,3 +59,17 @@ CREATE TABLE IF NOT EXISTS fixed_expenses (
     active INTEGER NOT NULL DEFAULT 1,  -- 1 = active, 0 = inactive
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
+
+-- =========================
+-- Income Sources (Configuration)
+-- =========================
+CREATE TABLE IF NOT EXISTS income_sources (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,                 -- e.g. "Salary"
+    amount REAL NOT NULL,               -- positive number
+    due_day INTEGER NOT NULL CHECK (due_day BETWEEN 1 AND 31),
+    category TEXT NOT NULL DEFAULT 'Income',
+    subcategory TEXT,                   -- Job, Freelance, Interest, etc.
+    active INTEGER NOT NULL DEFAULT 1,  -- 1 = active, 0 = inactive
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
