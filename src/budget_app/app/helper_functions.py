@@ -3,13 +3,13 @@ from pathlib import Path
 from datetime import date
 from dateutil.relativedelta import relativedelta
 
-ROOT = Path(__file__).resolve().parents[2]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+from budget_app.utils import get_repo_root
 
 from budget_app.db.db import (
     get_connection,
 )
+
+ROOT = get_repo_root()
 
 
 # ======================================================
@@ -32,18 +32,6 @@ def list_known_months() -> list[str]:
     ).fetchall()
     conn.close()
     return [r["month_id"] for r in rows]
-
-
-def month_exists(month_id: str) -> bool:
-    conn = get_connection()
-    exists = (
-        conn.execute(
-            "SELECT 1 FROM months WHERE month_id = ?", (month_id,)
-        ).fetchone()
-        is not None
-    )
-    conn.close()
-    return exists
 
 
 def get_month_status(month_id: str) -> str | None:
@@ -165,7 +153,9 @@ def get_category_actual(month_id: str, category: str) -> float:
 def get_category_planned(month_id: str, category: str) -> float:
     income = get_total_income(month_id)
     pct = get_active_objectives().get(category)
-    return income * pct if pct is not None else float("inf")
+    if pct is None:
+        raise RuntimeError(f"No objective defined for category {category}")
+    return income * pct
 
 
 def generate_month_options(

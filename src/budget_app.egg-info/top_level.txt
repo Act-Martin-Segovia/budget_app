@@ -1,1 +1,2 @@
+assets
 budget_app

@@ -5,6 +5,7 @@ description = "Local personal budget application"
 requires-python = ">=3.11"
 
 dependencies = [
+    "bcrypt",
     "streamlit",
 ]
 

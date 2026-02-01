@@ -6,6 +6,10 @@ src/budget_app.egg-info/SOURCES.txt
 src/budget_app.egg-info/dependency_links.txt
 src/budget_app.egg-info/requires.txt
 src/budget_app.egg-info/top_level.txt
+src/budget_app/app/__init__.py
+src/budget_app/app/helper_functions.py
 src/budget_app/app/main.py
 src/budget_app/db/__init__.py
 src/budget_app/db/db.py
+src/budget_app/utils/__init__.py
+src/budget_app/utils/paths.py

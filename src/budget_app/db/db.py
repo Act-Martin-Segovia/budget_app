@@ -4,22 +4,33 @@ import calendar
 from pathlib import Path
 from typing import Optional
 
-DB_PATH = Path("db/budget.db")
-SCHEMA_PATH = Path("src/budget_app/sql/schema.sql")
+from budget_app.utils import get_repo_root
 
+
+BASE_DIR = get_repo_root()
+DB_PATH = Path("db/budget.db")
+SCHEMA_PATH = BASE_DIR / "src" / "budget_app" / "sql" / "schema.sql"
 
 # -----------------------
 # Connection & init
 # -----------------------
 
+def set_db_path(db_path: str | Path) -> None:
+    global DB_PATH
+    DB_PATH = Path(db_path)
+
+
 def get_connection() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
+    conn.execute("PRAGMA foreign_keys = ON;")
     conn.row_factory = sqlite3.Row
     return conn
 
 
-def init_db() -> None:
+def init_db(db_path: str | Path | None = None) -> None:
+    if db_path is not None:
+        set_db_path(db_path)
     conn = get_connection()
     with open(SCHEMA_PATH) as f:
         conn.executescript(f.read())
@@ -93,52 +104,6 @@ def compute_transaction_date(month_id: str, due_day: int) -> str:
 
     day = min(due_day, last_day)
     return f"{year}-{month:02d}-{day:02d}"
-
-
-def insert_fixed_expenses_for_month(month_id: str):
-    """
-    Copy all active fixed expenses into transactions for a given month.
-    """
-    year, month = map(int, month_id.split("-"))
-
-    conn = get_connection()
-
-    fixed_expenses = conn.execute(
-        """
-        SELECT name, amount, due_day, category, subcategory
-        FROM fixed_expenses
-        WHERE active = 1
-        """
-    ).fetchall()
-
-    for fx in fixed_expenses:
-        # Clamp due day to last day of month (e.g. Feb 30 → Feb 28)
-        last_day = calendar.monthrange(year, month)[1]
-        day = min(fx["due_day"], last_day)
-
-        tx_date = date(year, month, day).isoformat()
-
-        conn.execute(
-            """
-            INSERT INTO transactions (
-                date, month_id, amount, category, subcategory, note
-            )
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (
-                tx_date,
-                month_id,
-                -abs(fx["amount"]),  # fixed expenses are always expenses
-                fx["category"],
-                fx["subcategory"],
-                fx["name"],
-            ),
-        )
-
-    conn.commit()
-    conn.close()
-
-
 
 # -----------------------
 # Transactions
@@ -269,4 +234,3 @@ def close_month(month_id: str) -> float:
     conn.close()
 
     return ending_balance
-

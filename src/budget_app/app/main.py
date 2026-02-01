@@ -1,11 +1,15 @@
 import sys
+import json
 from pathlib import Path
 from datetime import date
-from dateutil.relativedelta import relativedelta
+from collections.abc import Mapping
 
 import streamlit as st
+import bcrypt
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve()
+while not (ROOT / ".git").exists() and ROOT != ROOT.parent:
+    ROOT = ROOT.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -14,12 +18,12 @@ from budget_app.db.db import (
     close_month,
     init_db,
     open_month,
+    month_exists,
 )
 
 from budget_app.app.helper_functions import (
     current_month_id,
     list_known_months,
-    month_exists,
     get_month_snapshot,
     get_previous_month_ending_balance,
     get_month_totals_by_category,
@@ -49,7 +53,7 @@ from budget_app.app.helper_functions import (
 # App start
 # ======================================================
 
-ASSETS = Path(__file__).resolve().parents[2] / "assets"
+ASSETS = ROOT / "src" / "assets"
 st.set_page_config(
     page_title="Sobio Budget Planner",
     page_icon=str(ASSETS / "logo2.png"),
@@ -240,7 +244,75 @@ with col2:
 st.write("")
 st.write("")
 st.write("")
-init_db()
+def load_user_store() -> dict[str, str]:
+    users: dict[str, str] = {}
+
+    # 1. From Streamlit secrets
+    try:
+        if "users" in st.secrets:
+            for username, record in st.secrets["users"].items():
+                if isinstance(record, Mapping) and "password_hash" in record:
+                    users[str(username)] = str(record["password_hash"])
+    except Exception:
+        pass
+
+    # 2. Local fallback (optional)
+    if not users:
+        users_path = ROOT / "users.json"
+        if users_path.exists():
+            try:
+                with open(users_path) as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    users.update({str(k): str(v) for k, v in data.items()})
+            except json.JSONDecodeError:
+                pass
+
+    return users
+
+
+def verify_user(username: str, password: str, users: dict[str, str]) -> bool:
+    stored_hash = users.get(username)
+    if not stored_hash:
+        return False
+    try:
+        return bcrypt.checkpw(password.encode("utf-8"), stored_hash.encode("utf-8"))
+    except ValueError:
+        return False
+
+
+if "user" not in st.session_state:
+    st.markdown("## Sign in")
+    with st.form("login_form"):
+        username = st.text_input("Username")
+        password = st.text_input("Password", type="password")
+        submitted = st.form_submit_button("Sign in")
+
+    if submitted:
+        users = load_user_store()
+        if not users:
+            st.error("No users configured. Add users to st.secrets or users.json.")
+        elif verify_user(username.strip(), password, users):
+            st.session_state.user = username.strip()
+            st.rerun()
+        else:
+            st.error("Invalid username or password.")
+
+    st.stop()
+
+
+with st.sidebar:
+    st.caption(f"Signed in as {st.session_state.user}")
+    if st.button("Log out"):
+        st.session_state.pop("user", None)
+        st.rerun()
+
+db_path = Path("data") / f"{st.session_state.user}.db"
+#init_db(db_path)
+
+if "db_initialized" not in st.session_state:
+    init_db(db_path)
+    st.session_state.db_initialized = True
 
 if "pending_tx" not in st.session_state:
     st.session_state.pending_tx = None
