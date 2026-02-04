@@ -448,6 +448,47 @@ def get_variable_by_payment_method(month_id: str) -> dict[str, float]:
     return {r["payment_method"]: r["total"] for r in rows}
 
 
+def get_half_month_splits(month_id: str) -> dict[str, dict[str, float]]:
+    """
+    Return totals split by half-month.
+
+    - Income uses raw SUM(amount) (positive values).
+    - Fixed/Variable/Savings use ABS(SUM(amount)) to match display conventions.
+    - Uses actual transactions only (initialized months).
+    """
+    conn = get_connection()
+    rows = conn.execute(
+        """
+        SELECT
+            category,
+            CASE
+                WHEN CAST(substr(date, 9, 2) AS INTEGER) <= 15 THEN 'first'
+                ELSE 'second'
+            END AS half,
+            CASE
+                WHEN category = 'Income' THEN COALESCE(SUM(amount), 0)
+                ELSE ABS(SUM(amount))
+            END AS total
+        FROM transactions
+        WHERE month_id = ?
+          AND category IN ('Income', 'Fixed', 'Variable', 'Savings')
+        GROUP BY category, half
+        """,
+        (month_id,),
+    ).fetchall()
+    conn.close()
+
+    splits: dict[str, dict[str, float]] = {
+        "Income": {"first": 0.0, "second": 0.0},
+        "Fixed": {"first": 0.0, "second": 0.0},
+        "Variable": {"first": 0.0, "second": 0.0},
+        "Savings": {"first": 0.0, "second": 0.0},
+    }
+    for row in rows:
+        splits[row["category"]][row["half"]] = row["total"]
+    return splits
+
+
 def get_oldest_open_month() -> str | None:
     conn = get_connection()
     row = conn.execute(
