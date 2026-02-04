@@ -27,6 +27,7 @@ from budget_app.app.helper_functions import (
     current_month_id,
     list_known_months,
     get_month_snapshot,
+    get_month_status,
     get_previous_month_ending_balance,
     get_month_totals_by_category,
     get_total_income,
@@ -48,6 +49,7 @@ from budget_app.app.helper_functions import (
     preview_income_for_month,
     get_transactions_for_month,
     get_variable_by_payment_method,
+    get_half_month_splits,
     get_oldest_open_month,
     is_valid_sqlite_db,
 )
@@ -124,8 +126,6 @@ st.markdown(
     }
 
     .alloc-fixed { --accent: #6b7280; }
-    .alloc-variable { --accent: #eab308; }
-    .alloc-savings { --accent: #22c55e; }
 
     .alloc-grid {
         display: grid;
@@ -214,14 +214,12 @@ st.markdown(
         color: #ef4444; /* red */
     }
 
-    .comments {
-        font-size: 0.75rem;
-        font-weight: 600;
-        margin-left: 0.6rem;
-        padding: 0.15rem 0.45rem;
-        border-radius: 999px;
-        vertical-align: middle;
-        text-transform: uppercase;
+    .inflow {
+        color: #86efac;
+    }
+
+    .outflow {
+        color: #fca5a5;
     }
     
     </style>
@@ -346,7 +344,7 @@ if "confirm_close_month_for" not in st.session_state:
     st.session_state.confirm_close_month_for = None
 
 dashboard_tab, trx_tab, settings_tab, backup_data_tab = st.tabs(
-    ["📊 Main Dashboard", "📋 Trx Details", "⚙️ Settings", "💾 Restore Backup Data"]
+    ["📊 Main Dashboard", "📋 Transactions", "⚙️ Settings", "💾 Restore Backup Data"]
 )
 
 # ======================================================
@@ -673,12 +671,104 @@ with dashboard_tab:
                     unsafe_allow_html=True,
                 )
 
-        # -----------------------
-        # Transactions (only if open)
-        # -----------------------
+            st.divider()
+            st.markdown(
+                '<div class="subsection-header">Mid Month Cashflow</div>',
+                unsafe_allow_html=True,
+            )
+            splits = get_half_month_splits(selected_month)
+            header_cols = st.columns([1.2, 1.2, 1.2, 1.2, 1.2, 1.2])
+            header_labels = [
+                "Period",
+                "Income",
+                "Fixed expenses",
+                "Variable expenses",
+                "Savings",
+                "Balance",
+            ]
+            for col, label in zip(header_cols, header_labels):
+                col.markdown(f'<div class="alloc-label">{label}</div>', unsafe_allow_html=True)
+
+            periods = [("Day 1–15", "first"), ("Day 16–eom", "second")]
+            for label, key in periods:
+                income = splits.get("Income", {}).get(key, 0.0)
+                fixed = splits.get("Fixed", {}).get(key, 0.0)
+                variable = splits.get("Variable", {}).get(key, 0.0)
+                savings = splits.get("Savings", {}).get(key, 0.0)
+                balance = income - fixed - variable - savings
+                balance_class = "good" if balance >= 0 else "bad"
+                if balance < 0:
+                    balance_icon = "🚨"
+                elif balance < 100:
+                    balance_icon = "⚠️"
+                else:
+                    balance_icon = "✅"
+
+                c1, c2, c3, c4, c5, c6 = st.columns([1.2, 1.2, 1.2, 1.2, 1.2, 1.2])
+                c1.markdown(f'<div class="alloc-title">{label}</div>', unsafe_allow_html=True)
+                c2.markdown(
+                    f'<div class="alloc-value inflow">${income:,.2f}</div>',
+                    unsafe_allow_html=True,
+                )
+                c3.markdown(
+                    f'<div class="alloc-value outflow">${fixed:,.2f}</div>',
+                    unsafe_allow_html=True,
+                )
+                c4.markdown(
+                    f'<div class="alloc-value outflow">${variable:,.2f}</div>',
+                    unsafe_allow_html=True,
+                )
+                c5.markdown(
+                    f'<div class="alloc-value outflow">${savings:,.2f}</div>',
+                    unsafe_allow_html=True,
+                )
+                c6.markdown(
+                    f'<div class="alloc-value {balance_class}">'
+                    f'${balance:,.2f} {balance_icon}'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
 
         if status == "open":
             st.divider()
+            # --- First step ---
+            if st.session_state.confirm_close_month_for != selected_month:
+                if st.button("Close month"):
+                    st.session_state.confirm_close_month_for = selected_month
+                    st.rerun()
+
+            # --- Confirmation step ---
+            else:
+                st.warning(
+                    "⚠️ **Are you sure you want to close this month?**\n\n"
+                    "Once closed, you won’t be able to modify transactions."
+                )
+
+                c1, c2 = st.columns(2)
+
+                if c1.button("Yes, close month", type="primary"):
+                    close_month(selected_month)
+                    st.session_state.confirm_close_month_for = None
+                    st.success("Month closed.")
+                    st.rerun()
+
+                if c2.button("Cancel"):
+                    st.session_state.confirm_close_month_for = None
+                    st.info("Month closure cancelled.")
+                    st.rerun()
+
+# ======================================================
+# TRX DETAILS TAB
+# ======================================================
+with trx_tab:
+    if not month_exists(selected_month):
+        st.info("This month has not been initialized yet.")
+    else:
+        status = get_month_status(selected_month)
+        # -----------------------
+        # Transactions (only if open)
+        # -----------------------
+        if status == "open":
             st.markdown(
                 '<div class="subsection-header">Transaction Form</div>',
                 unsafe_allow_html=True,
@@ -791,62 +881,80 @@ with dashboard_tab:
                     st.session_state.pending_tx = None
                     st.success("Transaction added.")
                     st.rerun()
-
-        if status == "open":
             st.divider()
-            # --- First step ---
-            if st.session_state.confirm_close_month_for != selected_month:
-                if st.button("Close month"):
-                    st.session_state.confirm_close_month_for = selected_month
-                    st.rerun()
 
-            # --- Confirmation step ---
-            else:
-                st.warning(
-                    "⚠️ **Are you sure you want to close this month?**\n\n"
-                    "Once closed, you won’t be able to modify transactions."
-                )
-
-                c1, c2 = st.columns(2)
-
-                if c1.button("Yes, close month", type="primary"):
-                    close_month(selected_month)
-                    st.session_state.confirm_close_month_for = None
-                    st.success("Month closed.")
-                    st.rerun()
-
-                if c2.button("Cancel"):
-                    st.session_state.confirm_close_month_for = None
-                    st.info("Month closure cancelled.")
-                    st.rerun()
-
-# ======================================================
-# TRX DETAILS TAB
-# ======================================================
-with trx_tab:
-    st.subheader(f"Transactions — {selected_month}")
-
-    if not month_exists(selected_month):
-        st.info("This month has not been initialized yet.")
-    else:
         transactions = get_transactions_for_month(selected_month)
 
+        st.subheader(f"Transaction Details — {selected_month}")
         if not transactions:
             st.info("No transactions recorded for this month yet.")
         else:
-            # Convert to display-friendly format
-            table = []
-            for tx in transactions:
-                table.append(
-                    {
-                        "Date": tx["date"],
-                        "Category": tx["category"],
-                        "Subcategory": tx["subcategory"] or "—",
-                        "Amount": f"${tx['amount']:,.2f}",
-                        "Payment method": tx["payment_method"],
-                        "Note": tx["note"] or "",
-                    }
+            filter_col, group_col = st.columns(2)
+            with filter_col:
+                filter_labels = st.multiselect(
+                    "Filter by category",
+                    options=["Fixed", "Variable", "Savings", "Income"],
+                    default=["Fixed", "Variable", "Savings", "Income"],
                 )
+            if filter_labels:
+                transactions = [
+                    tx for tx in transactions if tx["category"] in filter_labels
+                ]
+
+            if not transactions:
+                st.info("No transactions match this filter.")
+                st.stop()
+
+            with group_col:
+                group_labels = st.multiselect(
+                    "Group by",
+                    options=["Category", "Subcategory", "Payment method"],
+                )
+
+            if not group_labels:
+                # Convert to display-friendly format
+                table = []
+                for tx in transactions:
+                    table.append(
+                        {
+                            "Date": tx["date"],
+                            "Category": tx["category"],
+                            "Subcategory": tx["subcategory"] or "—",
+                            "Amount": f"${tx['amount']:,.2f}",
+                            "Payment method": tx["payment_method"],
+                            "Note": tx["note"] or "",
+                        }
+                    )
+            else:
+                group_key_map = {
+                    "Category": "category",
+                    "Subcategory": "subcategory",
+                    "Payment method": "payment_method",
+                }
+                group_keys = [group_key_map[label] for label in group_labels]
+
+                grouped: dict[tuple[str, ...], dict[str, float]] = {}
+                for tx in transactions:
+                    key_parts = []
+                    for key in group_keys:
+                        value = tx[key]
+                        key_parts.append(value or "—")
+                    key_tuple = tuple(key_parts)
+                    if key_tuple not in grouped:
+                        grouped[key_tuple] = {"Total": 0.0, "Count": 0}
+                    grouped[key_tuple]["Total"] += abs(tx["amount"])
+                    grouped[key_tuple]["Count"] += 1
+
+                table = []
+                for key_tuple, data in sorted(
+                    grouped.items(), key=lambda item: item[1]["Total"], reverse=True
+                ):
+                    row = {}
+                    for label, value in zip(group_labels, key_tuple):
+                        row[label] = value
+                    row["Count"] = data["Count"]
+                    row["Total (abs)"] = f"${data['Total']:,.2f}"
+                    table.append(row)
 
             st.dataframe(
                 table,
@@ -1092,6 +1200,3 @@ with backup_data_tab:
                 st.session_state.backup_restored = True
 
                 st.rerun()
-
-
-
