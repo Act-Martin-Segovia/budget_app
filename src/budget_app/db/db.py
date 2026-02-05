@@ -38,6 +38,132 @@ def init_db(db_path: str | Path | None = None) -> None:
     conn.close()
 
 
+def _get_table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    rows = conn.execute(f"PRAGMA table_info({table});").fetchall()
+    return {row["name"] for row in rows}
+
+
+def _ensure_column(
+    conn: sqlite3.Connection, table: str, column: str, definition: str
+) -> None:
+    cols = _get_table_columns(conn, table)
+    if column not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {definition};")
+
+
+def migrate_db() -> None:
+    """
+    Lightweight migration for existing DBs.
+    Adds new tables/columns/indexes without touching existing data.
+    """
+    conn = get_connection()
+
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS bank_accounts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            active INTEGER NOT NULL DEFAULT 1,
+            effective_from_month_id TEXT NOT NULL,
+            effective_to_month_id TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS credit_cards (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            bank_account_id INTEGER NOT NULL,
+            statement_close_day INTEGER,
+            due_day INTEGER,
+            active INTEGER NOT NULL DEFAULT 1,
+            effective_from_month_id TEXT NOT NULL,
+            effective_to_month_id TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (bank_account_id) REFERENCES bank_accounts (id)
+        );
+
+        CREATE TABLE IF NOT EXISTS account_month_balances (
+            month_id TEXT NOT NULL,
+            bank_account_id INTEGER NOT NULL,
+            starting_balance REAL NOT NULL,
+            ending_balance REAL,
+            PRIMARY KEY (month_id, bank_account_id),
+            FOREIGN KEY (month_id) REFERENCES months (month_id),
+            FOREIGN KEY (bank_account_id) REFERENCES bank_accounts (id)
+        );
+        """
+    )
+
+    _ensure_column(
+        conn,
+        "transactions",
+        "bank_account_id",
+        "bank_account_id INTEGER",
+    )
+    _ensure_column(
+        conn,
+        "transactions",
+        "credit_card_id",
+        "credit_card_id INTEGER",
+    )
+    _ensure_column(
+        conn,
+        "transactions",
+        "statement_month_id",
+        "statement_month_id TEXT",
+    )
+    _ensure_column(
+        conn,
+        "transactions",
+        "due_month_id",
+        "due_month_id TEXT",
+    )
+    _ensure_column(
+        conn,
+        "transactions",
+        "due_date",
+        "due_date TEXT",
+    )
+    _ensure_column(
+        conn,
+        "fixed_expenses",
+        "bank_account_id",
+        "bank_account_id INTEGER",
+    )
+    _ensure_column(
+        conn,
+        "income_sources",
+        "bank_account_id",
+        "bank_account_id INTEGER",
+    )
+
+    _ensure_column(
+        conn,
+        "credit_cards",
+        "statement_close_day",
+        "statement_close_day INTEGER",
+    )
+    _ensure_column(
+        conn,
+        "credit_cards",
+        "due_day",
+        "due_day INTEGER",
+    )
+
+    conn.executescript(
+        """
+        CREATE INDEX IF NOT EXISTS idx_transactions_bank_account
+        ON transactions (bank_account_id);
+
+        CREATE INDEX IF NOT EXISTS idx_transactions_credit_card
+        ON transactions (credit_card_id);
+        """
+    )
+
+    conn.commit()
+    conn.close()
+
+
 # -----------------------
 # Month helpers
 # -----------------------
@@ -70,7 +196,7 @@ def get_active_fixed_expenses() -> list[sqlite3.Row]:
     conn = get_connection()
     cur = conn.execute(
         """
-        SELECT name, amount, due_day, category, subcategory
+        SELECT name, amount, due_day, category, subcategory, bank_account_id
         FROM fixed_expenses
         WHERE active = 1
         """
@@ -84,7 +210,7 @@ def get_active_income_sources() -> list[sqlite3.Row]:
     conn = get_connection()
     cur = conn.execute(
         """
-        SELECT name, amount, due_day, category, subcategory
+        SELECT name, amount, due_day, category, subcategory, bank_account_id
         FROM income_sources
         WHERE active = 1
         """
@@ -117,6 +243,11 @@ def add_transaction(
     category: str,
     subcategory: Optional[str],
     payment_method: str = "debit",
+    bank_account_id: Optional[int] = None,
+    credit_card_id: Optional[int] = None,
+    statement_month_id: Optional[str] = None,
+    due_month_id: Optional[str] = None,
+    due_date: Optional[str] = None,
     note: str = "",
     tx_type: str = "normal",
 ) -> None:
@@ -129,11 +260,37 @@ def add_transaction(
     conn.execute(
         """
         INSERT INTO transactions (
-            date, month_id, amount, category, subcategory, payment_method, note, type
+            date,
+            month_id,
+            amount,
+            category,
+            subcategory,
+            payment_method,
+            bank_account_id,
+            credit_card_id,
+            statement_month_id,
+            due_month_id,
+            due_date,
+            note,
+            type
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (date, month_id, amount, category, subcategory, payment_method, note, tx_type),
+        (
+            date,
+            month_id,
+            amount,
+            category,
+            subcategory,
+            payment_method,
+            bank_account_id,
+            credit_card_id,
+            statement_month_id,
+            due_month_id,
+            due_date,
+            note,
+            tx_type,
+        ),
     )
     conn.commit()
     conn.close()
@@ -172,6 +329,7 @@ def open_month(month_id: str, starting_balance: float) -> None:
             amount=-abs(fx["amount"]),
             category=fx["category"],
             subcategory=fx["subcategory"],
+            bank_account_id=fx["bank_account_id"],
             note=f"Fixed expense: {fx['name']}",
             tx_type="normal",
         )
@@ -186,6 +344,7 @@ def open_month(month_id: str, starting_balance: float) -> None:
             amount=abs(inc["amount"]),
             category="Income",
             subcategory=inc["subcategory"],
+            bank_account_id=inc["bank_account_id"],
             note=f"Income: {inc['name']}",
             tx_type="normal",
         )
@@ -229,6 +388,37 @@ def close_month(month_id: str) -> float:
         """,
         (ending_balance, month_id),
     )
+
+    # Update per-account ending balances (cash-only, excludes credit card charges)
+    acct_rows = conn.execute(
+        """
+        SELECT bank_account_id, starting_balance
+        FROM account_month_balances
+        WHERE month_id = ?
+        """,
+        (month_id,),
+    ).fetchall()
+
+    for acct in acct_rows:
+        net = conn.execute(
+            """
+            SELECT COALESCE(SUM(amount), 0) AS net
+            FROM transactions
+            WHERE month_id = ?
+              AND bank_account_id = ?
+            """,
+            (month_id, acct["bank_account_id"]),
+        ).fetchone()["net"]
+
+        ending = acct["starting_balance"] + net
+        conn.execute(
+            """
+            UPDATE account_month_balances
+            SET ending_balance = ?
+            WHERE month_id = ? AND bank_account_id = ?
+            """,
+            (ending, month_id, acct["bank_account_id"]),
+        )
 
     conn.commit()
     conn.close()

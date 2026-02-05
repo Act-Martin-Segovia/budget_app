@@ -21,6 +21,11 @@ def month_id_from_date(d: date) -> str:
     return f"{d.year}-{d.month:02d}"
 
 
+def clamp_day(year: int, month: int, day: int) -> int:
+    last_day = (date(year, month, 1) + relativedelta(months=1, days=-1)).day
+    return min(day, last_day)
+
+
 def current_month_id() -> str:
     return month_id_from_date(date.today())
 
@@ -61,6 +66,376 @@ def get_previous_month_ending_balance(month_id: str) -> float | None:
     conn.close()
 
     return row["ending_balance"] if row else None
+
+
+def get_previous_month_id(month_id: str) -> str:
+    year, month = map(int, month_id.split("-"))
+    dt = date(year, month, 1) - relativedelta(months=1)
+    return f"{dt.year}-{dt.month:02d}"
+
+
+def compute_credit_card_cycle(
+    tx_date: date, statement_close_day: int, due_day: int
+) -> tuple[str, str, date]:
+    """
+    Returns (statement_month_id, due_month_id, due_date).
+    Assumes due month is the month after the statement month.
+    """
+    close_day = clamp_day(tx_date.year, tx_date.month, statement_close_day)
+    if tx_date.day > close_day:
+        stmt_month_date = tx_date + relativedelta(months=1)
+    else:
+        stmt_month_date = tx_date
+
+    statement_month_id = month_id_from_date(stmt_month_date)
+
+    due_month_date = date(stmt_month_date.year, stmt_month_date.month, 1) + relativedelta(
+        months=1
+    )
+    due_day_clamped = clamp_day(due_month_date.year, due_month_date.month, due_day)
+    due_date = date(due_month_date.year, due_month_date.month, due_day_clamped)
+    due_month_id = month_id_from_date(due_date)
+
+    return statement_month_id, due_month_id, due_date
+
+
+# ======================================================
+# Bank Accounts & Credit Cards (Master Data)
+# ======================================================
+
+
+def get_bank_accounts() -> list[sqlite3.Row]:
+    conn = get_connection()
+    rows = conn.execute(
+        """
+        SELECT id, name, active, effective_from_month_id, effective_to_month_id
+        FROM bank_accounts
+        ORDER BY name
+        """
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def get_active_bank_accounts_for_month(month_id: str) -> list[sqlite3.Row]:
+    conn = get_connection()
+    rows = conn.execute(
+        """
+        SELECT id, name, effective_from_month_id, effective_to_month_id
+        FROM bank_accounts
+        WHERE active = 1
+          AND effective_from_month_id <= ?
+          AND (effective_to_month_id IS NULL OR effective_to_month_id >= ?)
+        ORDER BY name
+        """,
+        (month_id, month_id),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def has_bank_accounts() -> bool:
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT 1 FROM bank_accounts WHERE active = 1 LIMIT 1"
+    ).fetchone()
+    conn.close()
+    return row is not None
+
+
+def create_bank_account(
+    name: str,
+    effective_from_month_id: str,
+    effective_to_month_id: str | None,
+    active: int = 1,
+) -> None:
+    conn = get_connection()
+    conn.execute(
+        """
+        INSERT INTO bank_accounts (name, active, effective_from_month_id, effective_to_month_id)
+        VALUES (?, ?, ?, ?)
+        """,
+        (name, active, effective_from_month_id, effective_to_month_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def update_bank_account(
+    account_id: int,
+    name: str,
+    effective_from_month_id: str,
+    effective_to_month_id: str | None,
+    active: int = 1,
+) -> None:
+    conn = get_connection()
+    conn.execute(
+        """
+        UPDATE bank_accounts
+        SET name = ?, active = ?, effective_from_month_id = ?, effective_to_month_id = ?
+        WHERE id = ?
+        """,
+        (name, active, effective_from_month_id, effective_to_month_id, account_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def deactivate_bank_account(account_id: int) -> None:
+    conn = get_connection()
+    conn.execute(
+        """
+        UPDATE bank_accounts
+        SET active = 0
+        WHERE id = ?
+        """,
+        (account_id,),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_credit_cards() -> list[sqlite3.Row]:
+    conn = get_connection()
+    rows = conn.execute(
+        """
+        SELECT
+            id,
+            name,
+            bank_account_id,
+            statement_close_day,
+            due_day,
+            active,
+            effective_from_month_id,
+            effective_to_month_id
+        FROM credit_cards
+        ORDER BY name
+        """
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def get_active_credit_cards_for_month(month_id: str) -> list[sqlite3.Row]:
+    conn = get_connection()
+    rows = conn.execute(
+        """
+        SELECT
+            c.id,
+            c.name,
+            c.bank_account_id,
+            c.statement_close_day,
+            c.due_day,
+            b.name AS bank_account_name
+        FROM credit_cards c
+        JOIN bank_accounts b ON b.id = c.bank_account_id
+        WHERE c.active = 1
+          AND b.active = 1
+          AND c.effective_from_month_id <= ?
+          AND (c.effective_to_month_id IS NULL OR c.effective_to_month_id >= ?)
+          AND b.effective_from_month_id <= ?
+          AND (b.effective_to_month_id IS NULL OR b.effective_to_month_id >= ?)
+        ORDER BY c.name
+        """,
+        (month_id, month_id, month_id, month_id),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def create_credit_card(
+    name: str,
+    bank_account_id: int,
+    statement_close_day: int,
+    due_day: int,
+    effective_from_month_id: str,
+    effective_to_month_id: str | None,
+    active: int = 1,
+) -> None:
+    conn = get_connection()
+    conn.execute(
+        """
+        INSERT INTO credit_cards (
+            name,
+            bank_account_id,
+            statement_close_day,
+            due_day,
+            active,
+            effective_from_month_id,
+            effective_to_month_id
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            name,
+            bank_account_id,
+            statement_close_day,
+            due_day,
+            active,
+            effective_from_month_id,
+            effective_to_month_id,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def update_credit_card(
+    card_id: int,
+    name: str,
+    bank_account_id: int,
+    statement_close_day: int,
+    due_day: int,
+    effective_from_month_id: str,
+    effective_to_month_id: str | None,
+    active: int = 1,
+) -> None:
+    conn = get_connection()
+    conn.execute(
+        """
+        UPDATE credit_cards
+        SET name = ?, bank_account_id = ?, statement_close_day = ?, due_day = ?,
+            active = ?, effective_from_month_id = ?, effective_to_month_id = ?
+        WHERE id = ?
+        """,
+        (
+            name,
+            bank_account_id,
+            statement_close_day,
+            due_day,
+            active,
+            effective_from_month_id,
+            effective_to_month_id,
+            card_id,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def deactivate_credit_card(card_id: int) -> None:
+    conn = get_connection()
+    conn.execute(
+        """
+        UPDATE credit_cards
+        SET active = 0
+        WHERE id = ?
+        """,
+        (card_id,),
+    )
+    conn.commit()
+    conn.close()
+
+
+# ======================================================
+# Account Balances & Coverage
+# ======================================================
+
+
+def get_account_month_balances(month_id: str) -> dict[int, dict[str, float | None]]:
+    conn = get_connection()
+    rows = conn.execute(
+        """
+        SELECT bank_account_id, starting_balance, ending_balance
+        FROM account_month_balances
+        WHERE month_id = ?
+        """,
+        (month_id,),
+    ).fetchall()
+    conn.close()
+    return {
+        r["bank_account_id"]: {
+            "starting_balance": r["starting_balance"],
+            "ending_balance": r["ending_balance"],
+        }
+        for r in rows
+    }
+
+
+def get_account_ending_balances(month_id: str) -> dict[int, float]:
+    conn = get_connection()
+    rows = conn.execute(
+        """
+        SELECT bank_account_id, COALESCE(ending_balance, starting_balance) AS balance
+        FROM account_month_balances
+        WHERE month_id = ?
+        """,
+        (month_id,),
+    ).fetchall()
+    conn.close()
+    return {r["bank_account_id"]: r["balance"] for r in rows}
+
+
+def set_account_month_balances(
+    month_id: str, balances: dict[int, float]
+) -> None:
+    conn = get_connection()
+    rows = [(month_id, acct_id, bal) for acct_id, bal in balances.items()]
+    conn.executemany(
+        """
+        INSERT INTO account_month_balances (month_id, bank_account_id, starting_balance)
+        VALUES (?, ?, ?)
+        ON CONFLICT(month_id, bank_account_id)
+        DO UPDATE SET starting_balance = excluded.starting_balance
+        """,
+        rows,
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_account_coverage_snapshot(month_id: str) -> list[dict[str, float | str | int]]:
+    accounts = get_active_bank_accounts_for_month(month_id)
+    if not accounts:
+        return []
+
+    balances = get_account_month_balances(month_id)
+
+    conn = get_connection()
+    cash_rows = conn.execute(
+        """
+        SELECT bank_account_id, COALESCE(SUM(amount), 0) AS net
+        FROM transactions
+        WHERE month_id = ?
+          AND bank_account_id IS NOT NULL
+        GROUP BY bank_account_id
+        """,
+        (month_id,),
+    ).fetchall()
+
+    card_rows = conn.execute(
+        """
+        SELECT c.bank_account_id, COALESCE(SUM(t.amount), 0) AS net
+        FROM transactions t
+        JOIN credit_cards c ON c.id = t.credit_card_id
+        WHERE COALESCE(t.due_month_id, t.month_id) = ?
+        GROUP BY c.bank_account_id
+        """,
+        (month_id,),
+    ).fetchall()
+    conn.close()
+
+    cash_net = {r["bank_account_id"]: r["net"] for r in cash_rows}
+    card_net = {r["bank_account_id"]: r["net"] for r in card_rows}
+
+    snapshot: list[dict[str, float | str | int]] = []
+    for acct in accounts:
+        acct_id = acct["id"]
+        starting = balances.get(acct_id, {}).get("starting_balance", 0.0) or 0.0
+        projected = starting + cash_net.get(acct_id, 0.0)
+        due = max(0.0, -(card_net.get(acct_id, 0.0)))
+        shortfall = max(0.0, due - projected)
+        snapshot.append(
+            {
+                "bank_account_id": acct_id,
+                "bank_account_name": acct["name"],
+                "projected_balance": projected,
+                "card_due": due,
+                "shortfall": shortfall,
+            }
+        )
+
+    return snapshot
 
 
 def get_month_snapshot(month_id: str) -> dict:
@@ -172,7 +547,7 @@ def get_fixed_expenses():
     conn = get_connection()
     rows = conn.execute(
         """
-        SELECT id, name, amount, due_day, subcategory, active
+        SELECT id, name, amount, due_day, subcategory, bank_account_id, active
         FROM fixed_expenses
         WHERE active = 1
         ORDER BY due_day
@@ -182,7 +557,7 @@ def get_fixed_expenses():
     return rows
 
 
-def upsert_fixed_expense(name, amount, due_day, subcategory):
+def upsert_fixed_expense(name, amount, due_day, subcategory, bank_account_id):
     conn = get_connection()
 
     conn.execute(
@@ -198,10 +573,12 @@ def upsert_fixed_expense(name, amount, due_day, subcategory):
 
     conn.execute(
         """
-        INSERT INTO fixed_expenses (name, amount, due_day, category, subcategory)
-        VALUES (?, ?, ?, 'Fixed', ?)
+        INSERT INTO fixed_expenses (
+            name, amount, due_day, category, subcategory, bank_account_id
+        )
+        VALUES (?, ?, ?, 'Fixed', ?, ?)
         """,
-        (name, amount, due_day, subcategory),
+        (name, amount, due_day, subcategory, bank_account_id),
     )
 
     conn.commit()
@@ -226,7 +603,7 @@ def get_income_sources():
     conn = get_connection()
     rows = conn.execute(
         """
-        SELECT id, name, amount, due_day, subcategory, active
+        SELECT id, name, amount, due_day, subcategory, bank_account_id, active
         FROM income_sources
         WHERE active = 1
         ORDER BY due_day
@@ -236,7 +613,7 @@ def get_income_sources():
     return rows
 
 
-def upsert_income_source(name, amount, due_day, subcategory):
+def upsert_income_source(name, amount, due_day, subcategory, bank_account_id):
     conn = get_connection()
 
     conn.execute(
@@ -252,10 +629,12 @@ def upsert_income_source(name, amount, due_day, subcategory):
 
     conn.execute(
         """
-        INSERT INTO income_sources (name, amount, due_day, category, subcategory)
-        VALUES (?, ?, ?, 'Income', ?)
+        INSERT INTO income_sources (
+            name, amount, due_day, category, subcategory, bank_account_id
+        )
+        VALUES (?, ?, ?, 'Income', ?, ?)
         """,
-        (name, amount, due_day, subcategory),
+        (name, amount, due_day, subcategory, bank_account_id),
     )
 
     conn.commit()
@@ -420,6 +799,8 @@ def get_transactions_for_month(month_id: str):
             subcategory,
             amount,
             payment_method,
+            bank_account_id,
+            credit_card_id,
             note
         FROM transactions
         WHERE month_id = ?
@@ -448,33 +829,42 @@ def get_variable_by_payment_method(month_id: str) -> dict[str, float]:
     return {r["payment_method"]: r["total"] for r in rows}
 
 
-def get_half_month_splits(month_id: str) -> dict[str, dict[str, float]]:
+def get_half_month_cashflow_splits(month_id: str) -> dict[str, dict[str, float]]:
     """
     Return totals split by half-month.
 
     - Income uses raw SUM(amount) (positive values).
     - Fixed/Variable/Savings use ABS(SUM(amount)) to match display conventions.
-    - Uses actual transactions only (initialized months).
+    - Uses cashflow timing: credit card charges are assigned to due_date.
     """
     conn = get_connection()
     rows = conn.execute(
         """
         SELECT
             category,
-            CASE
-                WHEN CAST(substr(date, 9, 2) AS INTEGER) <= 15 THEN 'first'
-                ELSE 'second'
-            END AS half,
-            CASE
-                WHEN category = 'Income' THEN COALESCE(SUM(amount), 0)
-                ELSE ABS(SUM(amount))
-            END AS total
+            date AS effective_date,
+            amount,
+            payment_method,
+            due_date
         FROM transactions
         WHERE month_id = ?
+          AND (payment_method IS NULL OR payment_method = 'debit')
           AND category IN ('Income', 'Fixed', 'Variable', 'Savings')
-        GROUP BY category, half
+
+        UNION ALL
+
+        SELECT
+            category,
+            COALESCE(due_date, date) AS effective_date,
+            amount,
+            payment_method,
+            due_date
+        FROM transactions
+        WHERE COALESCE(due_month_id, month_id) = ?
+          AND payment_method = 'credit_card'
+          AND category IN ('Income', 'Fixed', 'Variable', 'Savings')
         """,
-        (month_id,),
+        (month_id, month_id),
     ).fetchall()
     conn.close()
 
@@ -484,8 +874,18 @@ def get_half_month_splits(month_id: str) -> dict[str, dict[str, float]]:
         "Variable": {"first": 0.0, "second": 0.0},
         "Savings": {"first": 0.0, "second": 0.0},
     }
+
     for row in rows:
-        splits[row["category"]][row["half"]] = row["total"]
+        if not row["effective_date"]:
+            continue
+        day = int(str(row["effective_date"])[8:10])
+        half = "first" if day <= 15 else "second"
+
+        if row["category"] == "Income":
+            splits["Income"][half] += row["amount"]
+        else:
+            splits[row["category"]][half] += abs(row["amount"])
+
     return splits
 
 

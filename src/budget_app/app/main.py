@@ -19,6 +19,7 @@ from budget_app.db.db import (
     add_transaction,
     close_month,
     init_db,
+    migrate_db,
     open_month,
     month_exists,
 )
@@ -28,13 +29,27 @@ from budget_app.app.helper_functions import (
     list_known_months,
     get_month_snapshot,
     get_month_status,
-    get_previous_month_ending_balance,
+    get_previous_month_id,
     get_month_totals_by_category,
     get_total_income,
     get_active_objectives,
     get_category_actual,
     get_category_planned,
     generate_month_options,
+    get_bank_accounts,
+    get_active_bank_accounts_for_month,
+    has_bank_accounts,
+    create_bank_account,
+    update_bank_account,
+    deactivate_bank_account,
+    get_credit_cards,
+    get_active_credit_cards_for_month,
+    create_credit_card,
+    update_credit_card,
+    deactivate_credit_card,
+    get_account_ending_balances,
+    set_account_month_balances,
+    get_account_coverage_snapshot,
     get_fixed_expenses,
     upsert_fixed_expense,
     deactivate_fixed_expense,
@@ -49,9 +64,10 @@ from budget_app.app.helper_functions import (
     preview_income_for_month,
     get_transactions_for_month,
     get_variable_by_payment_method,
-    get_half_month_splits,
+    get_half_month_cashflow_splits,
     get_oldest_open_month,
     is_valid_sqlite_db,
+    compute_credit_card_cycle,
 )
 
 # ======================================================
@@ -281,6 +297,14 @@ def verify_user(username: str, password: str, users: dict[str, str]) -> bool:
         return False
 
 
+def is_valid_month_id(value: str) -> bool:
+    try:
+        year, month = map(int, value.split("-"))
+        return 1 <= month <= 12 and len(value) == 7
+    except ValueError:
+        return False
+
+
 if "user" not in st.session_state:
     login_slot = st.empty()
     with login_slot:
@@ -328,6 +352,9 @@ if "db_initialized" not in st.session_state:
     init_db(db_path)
     st.session_state.db_initialized = True
 
+# Always run lightweight migrations (idempotent) to keep existing DBs updated
+migrate_db()
+
 if "pending_tx" not in st.session_state:
     st.session_state.pending_tx = None
 
@@ -339,6 +366,12 @@ if "editing_fx" not in st.session_state:
 
 if "editing_income" not in st.session_state:
     st.session_state.editing_income = None
+
+if "editing_account" not in st.session_state:
+    st.session_state.editing_account = None
+
+if "editing_card" not in st.session_state:
+    st.session_state.editing_card = None
 
 if "confirm_close_month_for" not in st.session_state:
     st.session_state.confirm_close_month_for = None
@@ -438,6 +471,9 @@ with dashboard_tab:
 
         if not has_objectives():
             missing_setup.append("budget objectives")
+        
+        if not has_bank_accounts():
+            missing_setup.append("bank accounts")
 
         if missing_setup:
             st.warning(
@@ -446,38 +482,93 @@ with dashboard_tab:
                 + ".\n\nGo to the **Settings** tab to complete the setup."
             )
         else:
-            prev_balance = get_previous_month_ending_balance(selected_month)
-
-            carry_over = True  # default
-
-            if prev_balance is not None and prev_balance != 0:
-                st.markdown(
-                    f"**Unused balance from previous month:** "
-                    f"${prev_balance:,.2f}"
+            active_accounts = get_active_bank_accounts_for_month(selected_month)
+            if not active_accounts:
+                st.warning(
+                    "No bank accounts are active for this month. "
+                    "Check effective dates in Settings."
+                )
+            else:
+                prev_month_id = get_previous_month_id(selected_month)
+                prev_balances = (
+                    get_account_ending_balances(prev_month_id)
+                    if month_exists(prev_month_id)
+                    else {}
                 )
 
-                carry_over = st.radio(
-                    "How should this balance be treated?",
-                    options=[
-                        "Carry it over as starting balance",
-                        "Ignore it (start from 0)",
-                    ],
-                    index=0,
-                ) == "Carry it over as starting balance"
+                carry_over = True
+                if prev_balances:
+                    carry_over = (
+                        st.radio(
+                            "How should prior account balances be treated?",
+                            options=[
+                                "Carry them over (recommended)",
+                                "Start all accounts at 0",
+                            ],
+                            index=0,
+                        )
+                        == "Carry them over (recommended)"
+                    )
+                else:
+                    st.info(
+                        "No prior account balances found. "
+                        "Starting balances will default to $0.00."
+                    )
+                    carry_over = False
 
-            if st.button("Initialize month"):
-                starting_balance = prev_balance if carry_over and prev_balance else 0.0
+                mode_key = (selected_month, "carry" if carry_over else "zero")
+                if st.session_state.get("init_bal_mode") != mode_key:
+                    for acct in active_accounts:
+                        default_balance = (
+                            prev_balances.get(acct["id"], 0.0)
+                            if carry_over
+                            else 0.0
+                        )
+                        st.session_state[
+                            f"init_bal_{selected_month}_{acct['id']}"
+                        ] = float(default_balance)
+                    st.session_state.init_bal_mode = mode_key
 
-                open_month(
-                    selected_month,
-                    starting_balance=starting_balance,
-                )
+                with st.form("init_month_form"):
+                    st.markdown("**Starting balances per account**")
+                    for acct in active_accounts:
+                        key = f"init_bal_{selected_month}_{acct['id']}"
+                        if key not in st.session_state:
+                            default_balance = (
+                                prev_balances.get(acct["id"], 0.0)
+                                if carry_over
+                                else 0.0
+                            )
+                            st.session_state[key] = float(default_balance)
+                        st.number_input(
+                            acct["name"],
+                            step=1.0,
+                            key=key,
+                        )
 
-                st.success(
-                    f"Month {selected_month} initialized "
-                    f"with starting balance ${starting_balance:,.2f}."
-                )
-                st.rerun()
+                    submitted_init = st.form_submit_button("Initialize month")
+
+                if submitted_init:
+                    balances = {}
+                    for acct in active_accounts:
+                        key = f"init_bal_{selected_month}_{acct['id']}"
+                        balances[acct["id"]] = float(
+                            st.session_state.get(key, 0.0)
+                        )
+
+                    starting_balance = sum(balances.values())
+
+                    open_month(
+                        selected_month,
+                        starting_balance=starting_balance,
+                    )
+                    set_account_month_balances(selected_month, balances)
+
+                    st.success(
+                        f"Month {selected_month} initialized "
+                        f"with starting balance ${starting_balance:,.2f}."
+                    )
+                    st.rerun()
     else:
         snapshot = get_month_snapshot(selected_month)
         status = snapshot["status"]
@@ -676,7 +767,7 @@ with dashboard_tab:
                 '<div class="subsection-header">Mid Month Cashflow</div>',
                 unsafe_allow_html=True,
             )
-            splits = get_half_month_splits(selected_month)
+            splits = get_half_month_cashflow_splits(selected_month)
             header_cols = st.columns([1.2, 1.2, 1.2, 1.2, 1.2, 1.2])
             header_labels = [
                 "Period",
@@ -729,6 +820,83 @@ with dashboard_tab:
                     unsafe_allow_html=True,
                 )
 
+            st.divider()
+            st.markdown(
+                '<div class="subsection-header">Account Coverage</div>',
+                unsafe_allow_html=True,
+            )
+            coverage = get_account_coverage_snapshot(selected_month)
+            if not coverage:
+                st.info("No account data available for this month.")
+            else:
+                header_cols = st.columns([2, 1.2, 1.2, 1.2])
+                header_labels = [
+                    "Bank account",
+                    "Projected balance",
+                    "Card due",
+                    "Shortfall",
+                ]
+                for col, label in zip(header_cols, header_labels):
+                    col.markdown(
+                        f'<div class="alloc-label">{label}</div>',
+                        unsafe_allow_html=True,
+                    )
+
+                for row in coverage:
+                    projected = row["projected_balance"]
+                    due = row["card_due"]
+                    shortfall = row["shortfall"]
+                    cushion = projected - due
+                    if cushion < 0:
+                        short_icon = "🚨"
+                    elif cushion < 100:
+                        short_icon = "⚠️"
+                    else:
+                        short_icon = "✅"
+                    short_class = "bad" if shortfall > 0 else "good"
+                    c1, c2, c3, c4 = st.columns([2, 1.2, 1.2, 1.2])
+                    c1.markdown(
+                        f'<div class="alloc-title">{row["bank_account_name"]}</div>',
+                        unsafe_allow_html=True,
+                    )
+                    c2.markdown(
+                        f'<div class="alloc-value">${projected:,.2f}</div>',
+                        unsafe_allow_html=True,
+                    )
+                    c3.markdown(
+                        f'<div class="alloc-value">${due:,.2f}</div>',
+                        unsafe_allow_html=True,
+                    )
+                    c4.markdown(
+                        f'<div class="alloc-value {short_class}">'
+                        f'${shortfall:,.2f} {short_icon}'
+                        f'</div>',
+                        unsafe_allow_html=True,
+                    )
+
+                total_shortfall = sum(r["shortfall"] for r in coverage)
+                if total_shortfall > 0:
+                    donor = max(coverage, key=lambda r: r["projected_balance"])
+                    receiver = max(coverage, key=lambda r: r["shortfall"])
+                    if donor["projected_balance"] > 0:
+                        donor_msg = (
+                            f"Suggested source: {donor['bank_account_name']} "
+                            f"(projected \\${donor['projected_balance']:,.2f})."
+                        )
+                        receiver_msg = (
+                            f"Top shortfall: {receiver['bank_account_name']} "
+                            f"(\\${receiver['shortfall']:,.2f})."
+                        )
+                        suggestion = f"{donor_msg} {receiver_msg}"
+                    else:
+                        suggestion = (
+                            "No account has a positive projected balance to cover it."
+                        )
+                    st.warning(
+                        f"Total shortfall across accounts: \\${total_shortfall:,.2f}. "
+                        f"Consider transferring funds. {suggestion}"
+                    )
+
         if status == "open":
             st.divider()
             # --- First step ---
@@ -779,6 +947,26 @@ with trx_tab:
             )
             st.write("")
 
+            accounts_for_month = get_active_bank_accounts_for_month(selected_month)
+            account_label_map = {
+                f"{a['name']} (id {a['id']})": a["id"] for a in accounts_for_month
+            }
+            account_options = ["—"] + list(account_label_map.keys())
+
+            cards_for_month = get_active_credit_cards_for_month(selected_month)
+            card_label_map = {
+                f"{c['name']} → {c['bank_account_name']} (id {c['id']})": c["id"]
+                for c in cards_for_month
+            }
+            card_options = ["—"] + list(card_label_map.keys())
+            card_meta_map = {
+                c["id"]: {
+                    "statement_close_day": c["statement_close_day"],
+                    "due_day": c["due_day"],
+                }
+                for c in cards_for_month
+            }
+
             CATEGORY_LABELS = {
                 "Income": "Income",
                 "Variable": "Variable Expense",
@@ -791,6 +979,14 @@ with trx_tab:
                 subcategory = st.text_input("Subcategory")
                 amount = st.number_input("Amount", min_value=0.0, step=1.0)
                 payment_method = st.selectbox("Payment method", ["Debit", "Credit card"])
+                bank_account_label = st.selectbox(
+                    "Bank account (for income/debit)",
+                    options=account_options,
+                )
+                credit_card_label = st.selectbox(
+                    "Credit card (for credit card purchases)",
+                    options=card_options,
+                )
                 note = st.text_input("Note (optional)")
                 submitted = st.form_submit_button("Add transaction")
 
@@ -812,57 +1008,122 @@ with trx_tab:
                 elif amount <= 0:
                     st.error("Amount must be greater than zero.")
                 else:
-                    subcategory = subcategory or None
-                    signed_amount = amount if category == "Income" else -amount
+                    bank_account_id = account_label_map.get(bank_account_label)
+                    credit_card_id = card_label_map.get(credit_card_label)
+                    statement_month_id = None
+                    due_month_id = None
+                    due_date = None
 
+                    is_valid = True
                     if category == "Income":
-                        add_transaction(
-                            date=tx_date.isoformat(),
-                            month_id=selected_month,
-                            amount=signed_amount,
-                            category=category,
-                            subcategory=subcategory,
-                            payment_method=None,
-                            note=note,
-                        )
-                        st.success("Income transaction added.")
-                        st.rerun()
+                        if bank_account_id is None:
+                            st.error("Income must be assigned to a bank account.")
+                            is_valid = False
                     else:
-                        actual = get_category_actual(selected_month, category)
-                        planned = get_category_planned(selected_month, category)
-                        simulated = actual + amount
+                        if payment_method == "Debit" and bank_account_id is None:
+                            st.error(
+                                "Debit transactions must be assigned to a bank account."
+                            )
+                            is_valid = False
+                        if payment_method == "Credit card" and credit_card_id is None:
+                            st.error(
+                                "Credit card transactions must select a credit card."
+                            )
+                            is_valid = False
+                        if payment_method == "Credit card" and credit_card_id is not None:
+                            meta = card_meta_map.get(credit_card_id, {})
+                            close_day = meta.get("statement_close_day")
+                            due_day = meta.get("due_day")
+                            if close_day is None or due_day is None:
+                                st.error(
+                                    "This credit card is missing statement close day "
+                                    "or due day. Update it in Settings."
+                                )
+                                is_valid = False
+                            else:
+                                statement_month_id, due_month_id, due_date = (
+                                    compute_credit_card_cycle(
+                                        tx_date, int(close_day), int(due_day)
+                                    )
+                                )
 
-                        if simulated > planned:
-                            st.session_state.pending_tx = {
-                                "date": tx_date.isoformat(),
-                                "month_id": selected_month,
-                                "amount": signed_amount,
-                                "category": category,
-                                "subcategory": subcategory,
-                                "payment_method": payment_method,
-                                "note": note,
-                                "planned": planned,
-                                "simulated": simulated,
-                            }
-                        else:
+                    if is_valid:
+                        subcategory = subcategory or None
+                        signed_amount = amount if category == "Income" else -amount
+
+                        if category == "Income":
                             add_transaction(
                                 date=tx_date.isoformat(),
                                 month_id=selected_month,
                                 amount=signed_amount,
                                 category=category,
                                 subcategory=subcategory,
-                                payment_method=payment_method.lower().replace(" ", "_"),
+                                payment_method=None,
+                                bank_account_id=bank_account_id,
+                                credit_card_id=None,
+                                statement_month_id=None,
+                                due_month_id=None,
+                                due_date=None,
                                 note=note,
                             )
-                            st.success("Transaction added.")
+                            st.success("Income transaction added.")
                             st.rerun()
+                        else:
+                            actual = get_category_actual(selected_month, category)
+                            planned = get_category_planned(selected_month, category)
+                            simulated = actual + amount
+
+                            if simulated > planned:
+                                st.session_state.pending_tx = {
+                                    "date": tx_date.isoformat(),
+                                    "month_id": selected_month,
+                                    "amount": signed_amount,
+                                    "category": category,
+                                    "subcategory": subcategory,
+                                    "payment_method": payment_method,
+                                    "bank_account_id": bank_account_id,
+                                    "credit_card_id": credit_card_id,
+                                    "statement_month_id": statement_month_id,
+                                    "due_month_id": due_month_id,
+                                    "due_date": due_date.isoformat() if due_date else None,
+                                    "note": note,
+                                    "planned": planned,
+                                    "simulated": simulated,
+                                }
+                            else:
+                                add_transaction(
+                                    date=tx_date.isoformat(),
+                                    month_id=selected_month,
+                                    amount=signed_amount,
+                                    category=category,
+                                    subcategory=subcategory,
+                                    payment_method=payment_method.lower().replace(" ", "_"),
+                                    bank_account_id=bank_account_id
+                                    if payment_method == "Debit"
+                                    else None,
+                                    credit_card_id=credit_card_id
+                                    if payment_method == "Credit card"
+                                    else None,
+                                    statement_month_id=statement_month_id
+                                    if payment_method == "Credit card"
+                                    else None,
+                                    due_month_id=due_month_id
+                                    if payment_method == "Credit card"
+                                    else None,
+                                    due_date=due_date.isoformat()
+                                    if payment_method == "Credit card" and due_date
+                                    else None,
+                                    note=note,
+                                )
+                                st.success("Transaction added.")
+                                st.rerun()
 
             pending = st.session_state.pending_tx
             if pending:
                 st.warning(
                     f"With this transaction you will exceed the target.\n\n"
-                    f"Planned: ${pending['planned']:,.2f}\n"
-                    f"After: ${pending['simulated']:,.2f}"
+                    f"Planned: \\${pending['planned']:,.2f}\n"
+                    f"After: \\${pending['simulated']:,.2f}"
                 )
 
                 c1, c2 = st.columns(2)
@@ -876,6 +1137,11 @@ with trx_tab:
                         category=pending["category"],
                         subcategory=pending["subcategory"],
                         payment_method=pending["payment_method"].lower().replace(" ", "_"),
+                        bank_account_id=pending.get("bank_account_id"),
+                        credit_card_id=pending.get("credit_card_id"),
+                        statement_month_id=pending.get("statement_month_id"),
+                        due_month_id=pending.get("due_month_id"),
+                        due_date=pending.get("due_date"),
                         note=pending["note"],
                     )
                     st.session_state.pending_tx = None
@@ -889,6 +1155,13 @@ with trx_tab:
         if not transactions:
             st.info("No transactions recorded for this month yet.")
         else:
+            account_name_map = {
+                a["id"]: a["name"] for a in get_bank_accounts()
+            }
+            card_name_map = {
+                c["id"]: c["name"] for c in get_credit_cards()
+            }
+
             filter_col, group_col = st.columns(2)
             with filter_col:
                 filter_labels = st.multiselect(
@@ -922,6 +1195,12 @@ with trx_tab:
                             "Subcategory": tx["subcategory"] or "—",
                             "Amount": f"${tx['amount']:,.2f}",
                             "Payment method": tx["payment_method"],
+                            "Bank account": account_name_map.get(
+                                tx["bank_account_id"], "—"
+                            ),
+                            "Credit card": card_name_map.get(
+                                tx["credit_card_id"], "—"
+                            ),
                             "Note": tx["note"] or "",
                         }
                     )
@@ -970,10 +1249,12 @@ with settings_tab:
     can_delete_for_selected_month = not month_exists(selected_month)
     st.info(
         "Start here 👋\n\n"
-        "1. Define your fixed expenses\n"
-        "2. Add your income sources\n"
-        "3. Set your budget objectives\n"
-        "4. Then initialize your first month from the Dashboard"
+        "1. Add your bank accounts\n"
+        "2. Add your credit cards\n"
+        "3. Define your fixed expenses\n"
+        "4. Add your income sources\n"
+        "5. Set your budget objectives\n"
+        "6. Then initialize your first month from the Dashboard"
     )
     if not can_delete_for_selected_month:
         st.warning(
@@ -982,9 +1263,208 @@ with settings_tab:
             "before initializing the selected month."
         )
 
-    fixed_tab, income_tab, objectives_tab = st.tabs(
-        ["Fixed Expenses", "Income", "Budget Objectives"]
+    bank_tab, card_tab, fixed_tab, income_tab, objectives_tab = st.tabs(
+        ["Bank Accounts", "Credit Cards", "Fixed Expenses", "Income", "Budget Objectives"]
     )
+
+    # ---------------- Bank accounts ----------------
+    with bank_tab:
+        st.markdown("### Bank Accounts")
+        st.info(
+            "Bank accounts are master data. Use effective dates to control "
+            "which months they apply to."
+        )
+
+        accounts = get_bank_accounts()
+        if accounts:
+            for acct in accounts:
+                c1, c2, c3, c4, c5, c6 = st.columns([3, 2, 2, 2, 1, 1])
+                c1.write(acct["name"])
+                c2.write(acct["effective_from_month_id"])
+                c3.write(acct["effective_to_month_id"] or "—")
+                c4.write("Active" if acct["active"] else "Inactive")
+                if c5.button("Edit", key=f"edit_acct_{acct['id']}"):
+                    st.session_state.editing_account = dict(acct)
+                if c6.button("Deactivate", key=f"deact_acct_{acct['id']}"):
+                    deactivate_bank_account(acct["id"])
+                    st.session_state.editing_account = None
+                    st.success("Bank account deactivated.")
+                    st.rerun()
+        else:
+            st.info("No bank accounts yet.")
+
+        st.divider()
+        st.markdown("#### Add / Edit Bank Account")
+
+        acct = st.session_state.editing_account or {}
+        with st.form("bank_account_form"):
+            name = st.text_input("Name", value=acct.get("name", ""))
+            effective_from = st.text_input(
+                "Effective from (YYYY-MM)",
+                value=acct.get("effective_from_month_id", current_month_id()),
+            )
+            effective_to = st.text_input(
+                "Effective to (YYYY-MM, optional)",
+                value=acct.get("effective_to_month_id") or "",
+            )
+            active = st.checkbox("Active", value=bool(acct.get("active", 1)))
+            submitted = st.form_submit_button("Save")
+
+        if submitted:
+            effective_to_val = effective_to.strip() or None
+            if not name:
+                st.error("Name is required.")
+            elif not is_valid_month_id(effective_from):
+                st.error("Effective from must be in YYYY-MM format.")
+            elif effective_to_val and not is_valid_month_id(effective_to_val):
+                st.error("Effective to must be in YYYY-MM format.")
+            elif effective_to_val and effective_to_val < effective_from:
+                st.error("Effective to must be after effective from.")
+            else:
+                if acct.get("id"):
+                    update_bank_account(
+                        acct["id"],
+                        name.strip(),
+                        effective_from,
+                        effective_to_val,
+                        1 if active else 0,
+                    )
+                    st.session_state.editing_account = None
+                    st.success("Bank account updated.")
+                else:
+                    create_bank_account(
+                        name.strip(),
+                        effective_from,
+                        effective_to_val,
+                        1 if active else 0,
+                    )
+                    st.success("Bank account created.")
+                st.rerun()
+
+    # ---------------- Credit cards ----------------
+    with card_tab:
+        st.markdown("### Credit Cards")
+        st.info(
+            "Credit cards are linked to a bank account that will pay them. "
+            "Statement close day and due day are used to estimate cashflow "
+            "in the following month."
+        )
+
+        accounts = get_bank_accounts()
+        account_name_map = {a["id"]: a["name"] for a in accounts}
+        account_label_map = {
+            f"{a['name']} (id {a['id']})": a["id"] for a in accounts
+        }
+        account_options = list(account_label_map.keys())
+
+        cards = get_credit_cards()
+        if cards:
+            for card in cards:
+                c1, c2, c3, c4, c5, c6, c7, c8 = st.columns([3, 2, 1.5, 1.5, 2, 2, 1, 1])
+                c1.write(card["name"])
+                c2.write(account_name_map.get(card["bank_account_id"], "—"))
+                c3.write(card["statement_close_day"] or "—")
+                c4.write(card["due_day"] or "—")
+                c5.write(card["effective_from_month_id"])
+                c6.write(card["effective_to_month_id"] or "—")
+                if c7.button("Edit", key=f"edit_card_{card['id']}"):
+                    st.session_state.editing_card = dict(card)
+                if c8.button("Deactivate", key=f"deact_card_{card['id']}"):
+                    deactivate_credit_card(card["id"])
+                    st.session_state.editing_card = None
+                    st.success("Credit card deactivated.")
+                    st.rerun()
+        else:
+            st.info("No credit cards yet.")
+
+        st.divider()
+        st.markdown("#### Add / Edit Credit Card")
+
+        card = st.session_state.editing_card or {}
+        with st.form("credit_card_form"):
+            name = st.text_input("Name", value=card.get("name", ""))
+            if account_options:
+                default_account = None
+                if card.get("bank_account_id"):
+                    for label, acct_id in account_label_map.items():
+                        if acct_id == card["bank_account_id"]:
+                            default_account = label
+                            break
+                selected_account = st.selectbox(
+                    "Bank account that pays this card",
+                    options=account_options,
+                    index=account_options.index(default_account)
+                    if default_account in account_options
+                    else 0,
+                    )
+            else:
+                selected_account = None
+                st.warning("Add a bank account before creating a credit card.")
+
+            statement_close_day = st.number_input(
+                "Statement close day (1–31)",
+                min_value=1,
+                max_value=31,
+                value=card.get("statement_close_day", 20) or 20,
+            )
+            due_day = st.number_input(
+                "Payment due day (1–31, following month)",
+                min_value=1,
+                max_value=31,
+                value=card.get("due_day", 5) or 5,
+            )
+            effective_from = st.text_input(
+                "Effective from (YYYY-MM)",
+                value=card.get("effective_from_month_id", current_month_id()),
+            )
+            effective_to = st.text_input(
+                "Effective to (YYYY-MM, optional)",
+                value=card.get("effective_to_month_id") or "",
+            )
+            active = st.checkbox("Active", value=bool(card.get("active", 1)))
+            submitted = st.form_submit_button("Save")
+
+        if submitted:
+            effective_to_val = effective_to.strip() or None
+            bank_account_id = (
+                account_label_map.get(selected_account) if selected_account else None
+            )
+            if not name:
+                st.error("Name is required.")
+            elif bank_account_id is None:
+                st.error("Select a bank account for this credit card.")
+            elif not is_valid_month_id(effective_from):
+                st.error("Effective from must be in YYYY-MM format.")
+            elif effective_to_val and not is_valid_month_id(effective_to_val):
+                st.error("Effective to must be in YYYY-MM format.")
+            elif effective_to_val and effective_to_val < effective_from:
+                st.error("Effective to must be after effective from.")
+            else:
+                if card.get("id"):
+                    update_credit_card(
+                        card["id"],
+                        name.strip(),
+                        bank_account_id,
+                        int(statement_close_day),
+                        int(due_day),
+                        effective_from,
+                        effective_to_val,
+                        1 if active else 0,
+                    )
+                    st.session_state.editing_card = None
+                    st.success("Credit card updated.")
+                else:
+                    create_credit_card(
+                        name.strip(),
+                        bank_account_id,
+                        int(statement_close_day),
+                        int(due_day),
+                        effective_from,
+                        effective_to_val,
+                        1 if active else 0,
+                    )
+                    st.success("Credit card created.")
+                st.rerun()
 
     # ---------------- Fixed expenses ----------------
     with fixed_tab:
@@ -994,18 +1474,26 @@ with settings_tab:
             "They are copied as transactions when a month is initialized."
         )
 
+        accounts = get_bank_accounts()
+        account_name_map = {a["id"]: a["name"] for a in accounts}
+        account_label_map = {
+            f"{a['name']} (id {a['id']})": a["id"] for a in accounts
+        }
+        account_options = ["—"] + list(account_label_map.keys())
+
         expenses = get_fixed_expenses()
 
         for fx in expenses:
-            c1, c2, c3, c4, c5, c6 = st.columns([3, 2, 2, 2, 1, 1])
+            c1, c2, c3, c4, c5, c6, c7 = st.columns([3, 2, 2, 2, 2, 1, 1])
             c1.write(fx["name"])
             c2.write(f"${fx['amount']:,.2f}")
             c3.write(f"Day {fx['due_day']}")
-            c4.write(fx["subcategory"] or "")
+            c4.write(account_name_map.get(fx["bank_account_id"], "—"))
+            c5.write(fx["subcategory"] or "")
             if fx["active"]:
-                if c5.button("Edit", key=f"edit_{fx['id']}"):
+                if c6.button("Edit", key=f"edit_{fx['id']}"):
                     st.session_state.editing_fx = dict(fx)
-                if c6.button(
+                if c7.button(
                     "Delete",
                     key=f"delete_{fx['id']}",
                     disabled=not can_delete_for_selected_month,
@@ -1028,6 +1516,19 @@ with settings_tab:
             due_day = st.number_input(
                 "Due day (1–31)", min_value=1, max_value=31, value=fx.get("due_day", 1)
             )
+            default_account = None
+            if fx.get("bank_account_id"):
+                for label, acct_id in account_label_map.items():
+                    if acct_id == fx["bank_account_id"]:
+                        default_account = label
+                        break
+            bank_account_label = st.selectbox(
+                "Bank account (optional)",
+                options=account_options,
+                index=account_options.index(default_account)
+                if default_account in account_options
+                else 0,
+            )
             subcategory = st.text_input(
                 "Subcategory", value=fx.get("subcategory", "") or ""
             )
@@ -1037,7 +1538,10 @@ with settings_tab:
             if not name or amount <= 0:
                 st.error("Name and amount are required.")
             else:
-                upsert_fixed_expense(name, amount, due_day, subcategory or None)
+                bank_account_id = account_label_map.get(bank_account_label)
+                upsert_fixed_expense(
+                    name, amount, due_day, subcategory or None, bank_account_id
+                )
                 st.session_state.editing_fx = None
                 st.success("Fixed expense saved.")
                 st.rerun()
@@ -1050,18 +1554,26 @@ with settings_tab:
             "They are copied as transactions when a month is initialized."
         )
 
+        accounts = get_bank_accounts()
+        account_name_map = {a["id"]: a["name"] for a in accounts}
+        account_label_map = {
+            f"{a['name']} (id {a['id']})": a["id"] for a in accounts
+        }
+        account_options = ["—"] + list(account_label_map.keys())
+
         incomes = get_income_sources()
 
         for inc in incomes:
-            c1, c2, c3, c4, c5, c6 = st.columns([3, 2, 2, 2, 1, 1])
+            c1, c2, c3, c4, c5, c6, c7 = st.columns([3, 2, 2, 2, 2, 1, 1])
             c1.write(inc["name"])
             c2.write(f"${inc['amount']:,.2f}")
             c3.write(f"Day {inc['due_day']}")
-            c4.write(inc["subcategory"] or "")
+            c4.write(account_name_map.get(inc["bank_account_id"], "—"))
+            c5.write(inc["subcategory"] or "")
             if inc["active"]:
-                if c5.button("Edit", key=f"edit_income_{inc['id']}"):
+                if c6.button("Edit", key=f"edit_income_{inc['id']}"):
                     st.session_state.editing_income = dict(inc)
-                if c6.button(
+                if c7.button(
                     "Delete",
                     key=f"delete_income_{inc['id']}",
                     disabled=not can_delete_for_selected_month,
@@ -1084,6 +1596,19 @@ with settings_tab:
             due_day = st.number_input(
                 "Due day (1–31)", min_value=1, max_value=31, value=inc.get("due_day", 1)
             )
+            default_account = None
+            if inc.get("bank_account_id"):
+                for label, acct_id in account_label_map.items():
+                    if acct_id == inc["bank_account_id"]:
+                        default_account = label
+                        break
+            bank_account_label = st.selectbox(
+                "Bank account (optional)",
+                options=account_options,
+                index=account_options.index(default_account)
+                if default_account in account_options
+                else 0,
+            )
             subcategory = st.text_input(
                 "Subcategory", value=inc.get("subcategory", "") or ""
             )
@@ -1093,7 +1618,10 @@ with settings_tab:
             if not name or amount <= 0:
                 st.error("Name and amount are required.")
             else:
-                upsert_income_source(name, amount, due_day, subcategory or None)
+                bank_account_id = account_label_map.get(bank_account_label)
+                upsert_income_source(
+                    name, amount, due_day, subcategory or None, bank_account_id
+                )
                 st.session_state.editing_income = None
                 st.success("Income source saved.")
                 st.rerun()
