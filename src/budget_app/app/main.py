@@ -881,19 +881,20 @@ with dashboard_tab:
                     if donor["projected_balance"] > 0:
                         donor_msg = (
                             f"Suggested source: {donor['bank_account_name']} "
-                            f"(projected \\${donor['projected_balance']:,.2f})."
+                            f"(projected ${donor['projected_balance']:,.2f})."
                         )
                         receiver_msg = (
                             f"Top shortfall: {receiver['bank_account_name']} "
-                            f"(\\${receiver['shortfall']:,.2f})."
+                            f"(${receiver['shortfall']:,.2f})."
                         )
                         suggestion = f"{donor_msg} {receiver_msg}"
                     else:
                         suggestion = (
                             "No account has a positive projected balance to cover it."
                         )
+                    st.write("")
                     st.warning(
-                        f"Total shortfall across accounts: \\${total_shortfall:,.2f}. "
+                        f"Total shortfall across accounts: ${total_shortfall:,.2f}. "
                         f"Consider transferring funds. {suggestion}"
                     )
 
@@ -1122,8 +1123,8 @@ with trx_tab:
             if pending:
                 st.warning(
                     f"With this transaction you will exceed the target.\n\n"
-                    f"Planned: \\${pending['planned']:,.2f}\n"
-                    f"After: \\${pending['simulated']:,.2f}"
+                    f"Planned: ${pending['planned']:,.2f}\n"
+                    f"After: ${pending['simulated']:,.2f}"
                 )
 
                 c1, c2 = st.columns(2)
