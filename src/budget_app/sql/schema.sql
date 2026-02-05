@@ -10,6 +10,49 @@ CREATE TABLE IF NOT EXISTS months (
 );
 
 -- =========================
+-- Bank Accounts (Master Data)
+-- =========================
+CREATE TABLE IF NOT EXISTS bank_accounts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    active INTEGER NOT NULL DEFAULT 1,
+    effective_from_month_id TEXT NOT NULL,
+    effective_to_month_id TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+-- =========================
+-- Credit Cards (Master Data)
+-- =========================
+CREATE TABLE IF NOT EXISTS credit_cards (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    bank_account_id INTEGER NOT NULL,
+    statement_close_day INTEGER,
+    due_day INTEGER,
+    active INTEGER NOT NULL DEFAULT 1,
+    effective_from_month_id TEXT NOT NULL,
+    effective_to_month_id TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+
+    FOREIGN KEY (bank_account_id) REFERENCES bank_accounts (id)
+);
+
+-- =========================
+-- Account Balances (Per Month)
+-- =========================
+CREATE TABLE IF NOT EXISTS account_month_balances (
+    month_id TEXT NOT NULL,
+    bank_account_id INTEGER NOT NULL,
+    starting_balance REAL NOT NULL,
+    ending_balance REAL,
+
+    PRIMARY KEY (month_id, bank_account_id),
+    FOREIGN KEY (month_id) REFERENCES months (month_id),
+    FOREIGN KEY (bank_account_id) REFERENCES bank_accounts (id)
+);
+
+-- =========================
 -- Transactions
 -- =========================
 CREATE TABLE IF NOT EXISTS transactions (
@@ -20,15 +63,23 @@ CREATE TABLE IF NOT EXISTS transactions (
     category TEXT NOT NULL,              -- Fixed, Variable, Income, Savings
     subcategory TEXT,                    -- Groceries, Rent, Salary, etc.
     payment_method TEXT,
+    bank_account_id INTEGER,
+    credit_card_id INTEGER,
+    statement_month_id TEXT,
+    due_month_id TEXT,
+    due_date TEXT,
     note TEXT,
     type TEXT NOT NULL CHECK (type IN ('normal', 'correction')),
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
 
-    FOREIGN KEY (month_id) REFERENCES months (month_id)
+    FOREIGN KEY (month_id) REFERENCES months (month_id),
+    FOREIGN KEY (bank_account_id) REFERENCES bank_accounts (id),
+    FOREIGN KEY (credit_card_id) REFERENCES credit_cards (id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_transactions_month
 ON transactions (month_id);
+
 
 -- =========================
 -- Budget Objectives (Settings)
@@ -56,8 +107,11 @@ CREATE TABLE IF NOT EXISTS fixed_expenses (
     due_day INTEGER NOT NULL CHECK (due_day BETWEEN 1 AND 31),
     category TEXT NOT NULL DEFAULT 'Fixed',
     subcategory TEXT,                   -- Housing, Transport, Taxes, etc.
+    bank_account_id INTEGER,
     active INTEGER NOT NULL DEFAULT 1,  -- 1 = active, 0 = inactive
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+
+    FOREIGN KEY (bank_account_id) REFERENCES bank_accounts (id)
 );
 
 -- =========================
@@ -70,6 +124,9 @@ CREATE TABLE IF NOT EXISTS income_sources (
     due_day INTEGER NOT NULL CHECK (due_day BETWEEN 1 AND 31),
     category TEXT NOT NULL DEFAULT 'Income',
     subcategory TEXT,                   -- Job, Freelance, Interest, etc.
+    bank_account_id INTEGER,
     active INTEGER NOT NULL DEFAULT 1,  -- 1 = active, 0 = inactive
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+
+    FOREIGN KEY (bank_account_id) REFERENCES bank_accounts (id)
 );
