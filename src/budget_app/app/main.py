@@ -887,15 +887,17 @@ with dashboard_tab:
                             f"Top shortfall: {receiver['bank_account_name']} "
                             f"(${receiver['shortfall']:,.2f})."
                         )
-                        suggestion = f"{donor_msg} {receiver_msg}"
+                        suggestion = f"{donor_msg}\n\n{receiver_msg}"
                     else:
                         suggestion = (
                             "No account has a positive projected balance to cover it."
                         )
                     st.write("")
                     st.warning(
-                        f"Total shortfall across accounts: ${total_shortfall:,.2f}. "
-                        f"Consider transferring funds. {suggestion}"
+                        f"Total shortfall across accounts: ${total_shortfall:,.2f}.\n"
+                    )
+                    st.warning(
+                        f"Consider transferring funds.\n\n{suggestion}"
                     )
 
         if status == "open":
