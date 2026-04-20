@@ -6,6 +6,7 @@ UV := $(HOME)/.local/bin/uv
 help:
 	@echo "make setup        Install uv, create venv, install deps"
 	@echo "make lint         Run ruff and sqlfluff"
+	@echo "make test         Run unit tests"
 	@echo "make run          Run the app"
 
 .PHONY: install-uv
@@ -25,7 +26,10 @@ lint:
 	$(VENV)/bin/ruff format .
 	$(VENV)/bin/sqlfluff lint sql || true
 
+.PHONY: test
+test:
+	$(VENV)/bin/pytest
+
 .PHONY: run
 run:
 	$(VENV)/bin/python -m streamlit run src/budget_app/app/main.py
-

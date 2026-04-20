@@ -107,11 +107,14 @@ CREATE TABLE IF NOT EXISTS fixed_expenses (
     due_day INTEGER NOT NULL CHECK (due_day BETWEEN 1 AND 31),
     category TEXT NOT NULL DEFAULT 'Fixed',
     subcategory TEXT,                   -- Housing, Transport, Taxes, etc.
+    payment_method TEXT NOT NULL DEFAULT 'debit',
     bank_account_id INTEGER,
+    credit_card_id INTEGER,
     active INTEGER NOT NULL DEFAULT 1,  -- 1 = active, 0 = inactive
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
 
-    FOREIGN KEY (bank_account_id) REFERENCES bank_accounts (id)
+    FOREIGN KEY (bank_account_id) REFERENCES bank_accounts (id),
+    FOREIGN KEY (credit_card_id) REFERENCES credit_cards (id)
 );
 
 -- =========================

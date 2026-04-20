@@ -67,8 +67,8 @@ from budget_app.app.helper_functions import (
     get_half_month_cashflow_splits,
     get_oldest_open_month,
     is_valid_sqlite_db,
-    compute_credit_card_cycle,
 )
+from budget_app.utils.billing import compute_credit_card_cycle
 
 # ======================================================
 # App start
@@ -421,15 +421,19 @@ with dashboard_tab:
         st.info("This month has not been initialized yet.")
 
         preview, total_fixed = preview_fixed_expenses_for_month(selected_month)
+        invalid_fixed_expenses = [fx for fx in preview if fx["issue"]]
         if preview:
             st.divider()
             st.markdown("**Fixed expenses that will apply:**")
 
             for fx in preview:
-                c1, c2, c3 = st.columns([2, 4, 2])
+                c1, c2, c3, c4 = st.columns([2, 4, 3, 2])
                 c1.write(fx["date"].strftime("%Y-%m-%d"))
                 c2.write(f"{fx['name']} ({fx['subcategory'] or '—'})")
-                c3.write(f"${fx['amount']:,.2f}")
+                c3.write(fx["payment_detail"])
+                c4.write(f"${fx['amount']:,.2f}")
+                if fx["issue"]:
+                    st.caption(f"{fx['name']}: {fx['issue']}")
         else:
             st.divider()
             st.markdown("**Fixed expenses that will apply:**")
@@ -481,6 +485,13 @@ with dashboard_tab:
                 + ", ".join(missing_setup)
                 + ".\n\nGo to the **Settings** tab to complete the setup."
             )
+        elif invalid_fixed_expenses:
+            st.warning(
+                "Some fixed expenses cannot be initialized for this month. "
+                "Update them in the **Settings** tab."
+            )
+            for fx in invalid_fixed_expenses:
+                st.write(f"- {fx['name']}: {fx['issue']}")
         else:
             active_accounts = get_active_bank_accounts_for_month(selected_month)
             if not active_accounts:
@@ -1483,20 +1494,38 @@ with settings_tab:
             f"{a['name']} (id {a['id']})": a["id"] for a in accounts
         }
         account_options = ["—"] + list(account_label_map.keys())
+        cards = get_credit_cards()
+        card_name_map = {c["id"]: c["name"] for c in cards}
+        card_label_map = {
+            (
+                f"{c['name']} (id {c['id']})"
+                if c["active"]
+                else f"{c['name']} (id {c['id']}, inactive)"
+            ): c["id"]
+            for c in cards
+        }
+        card_options = ["—"] + list(card_label_map.keys())
 
         expenses = get_fixed_expenses()
 
         for fx in expenses:
-            c1, c2, c3, c4, c5, c6, c7 = st.columns([3, 2, 2, 2, 2, 1, 1])
+            payment_method = fx["payment_method"]
+            funding_name = (
+                card_name_map.get(fx["credit_card_id"], "—")
+                if payment_method == "credit_card"
+                else account_name_map.get(fx["bank_account_id"], "—")
+            )
+            c1, c2, c3, c4, c5, c6, c7, c8 = st.columns([3, 2, 2, 2, 2, 2, 1, 1])
             c1.write(fx["name"])
             c2.write(f"${fx['amount']:,.2f}")
             c3.write(f"Day {fx['due_day']}")
-            c4.write(account_name_map.get(fx["bank_account_id"], "—"))
-            c5.write(fx["subcategory"] or "")
+            c4.write("Credit card" if payment_method == "credit_card" else "Debit")
+            c5.write(funding_name)
+            c6.write(fx["subcategory"] or "")
             if fx["active"]:
-                if c6.button("Edit", key=f"edit_{fx['id']}"):
+                if c7.button("Edit", key=f"edit_{fx['id']}"):
                     st.session_state.editing_fx = dict(fx)
-                if c7.button(
+                if c8.button(
                     "Delete",
                     key=f"delete_{fx['id']}",
                     disabled=not can_delete_for_selected_month,
@@ -1512,6 +1541,10 @@ with settings_tab:
         fx = st.session_state.editing_fx or {}
 
         with st.form("fixed_expense_form"):
+            payment_method_options = ["Debit", "Credit card"]
+            default_payment_method = (
+                "Credit card" if fx.get("payment_method") == "credit_card" else "Debit"
+            )
             name = st.text_input("Name", value=fx.get("name", ""))
             amount = st.number_input(
                 "Amount", min_value=0.0, step=1.0, value=fx.get("amount", 0.0)
@@ -1519,17 +1552,35 @@ with settings_tab:
             due_day = st.number_input(
                 "Due day (1–31)", min_value=1, max_value=31, value=fx.get("due_day", 1)
             )
+            payment_method_label = st.selectbox(
+                "Payment method",
+                options=payment_method_options,
+                index=payment_method_options.index(default_payment_method),
+            )
             default_account = None
             if fx.get("bank_account_id"):
                 for label, acct_id in account_label_map.items():
                     if acct_id == fx["bank_account_id"]:
                         default_account = label
                         break
+            default_card = None
+            if fx.get("credit_card_id"):
+                for label, card_id in card_label_map.items():
+                    if card_id == fx["credit_card_id"]:
+                        default_card = label
+                        break
             bank_account_label = st.selectbox(
                 "Bank account (optional)",
                 options=account_options,
                 index=account_options.index(default_account)
                 if default_account in account_options
+                else 0,
+            )
+            credit_card_label = st.selectbox(
+                "Credit card",
+                options=card_options,
+                index=card_options.index(default_card)
+                if default_card in card_options
                 else 0,
             )
             subcategory = st.text_input(
@@ -1540,10 +1591,28 @@ with settings_tab:
         if submitted:
             if not name or amount <= 0:
                 st.error("Name and amount are required.")
+            elif payment_method_label == "Credit card" and credit_card_label == "—":
+                st.error("Select a credit card for credit-card fixed expenses.")
             else:
-                bank_account_id = account_label_map.get(bank_account_label)
+                payment_method = payment_method_label.lower().replace(" ", "_")
+                bank_account_id = (
+                    account_label_map.get(bank_account_label)
+                    if payment_method == "debit"
+                    else None
+                )
+                credit_card_id = (
+                    card_label_map.get(credit_card_label)
+                    if payment_method == "credit_card"
+                    else None
+                )
                 upsert_fixed_expense(
-                    name, amount, due_day, subcategory or None, bank_account_id
+                    name,
+                    amount,
+                    due_day,
+                    subcategory or None,
+                    payment_method,
+                    bank_account_id,
+                    credit_card_id,
                 )
                 st.session_state.editing_fx = None
                 st.success("Fixed expense saved.")

@@ -4,7 +4,8 @@ import calendar
 from pathlib import Path
 from typing import Optional
 
-from budget_app.utils import get_repo_root
+from budget_app.utils.billing import compute_credit_card_cycle
+from budget_app.utils.paths import get_repo_root
 
 
 BASE_DIR = get_repo_root()
@@ -127,8 +128,20 @@ def migrate_db() -> None:
     _ensure_column(
         conn,
         "fixed_expenses",
+        "payment_method",
+        "payment_method TEXT DEFAULT 'debit'",
+    )
+    _ensure_column(
+        conn,
+        "fixed_expenses",
         "bank_account_id",
         "bank_account_id INTEGER",
+    )
+    _ensure_column(
+        conn,
+        "fixed_expenses",
+        "credit_card_id",
+        "credit_card_id INTEGER",
     )
     _ensure_column(
         conn,
@@ -196,7 +209,15 @@ def get_active_fixed_expenses() -> list[sqlite3.Row]:
     conn = get_connection()
     cur = conn.execute(
         """
-        SELECT name, amount, due_day, category, subcategory, bank_account_id
+        SELECT
+            name,
+            amount,
+            due_day,
+            category,
+            subcategory,
+            COALESCE(payment_method, 'debit') AS payment_method,
+            bank_account_id,
+            credit_card_id
         FROM fixed_expenses
         WHERE active = 1
         """
@@ -309,6 +330,83 @@ def open_month(month_id: str, starting_balance: float) -> None:
         return
 
     conn = get_connection()
+    card_rows = conn.execute(
+        """
+        SELECT
+            c.id,
+            c.statement_close_day,
+            c.due_day
+        FROM credit_cards c
+        JOIN bank_accounts b ON b.id = c.bank_account_id
+        WHERE c.active = 1
+          AND b.active = 1
+          AND c.effective_from_month_id <= ?
+          AND (c.effective_to_month_id IS NULL OR c.effective_to_month_id >= ?)
+          AND b.effective_from_month_id <= ?
+          AND (b.effective_to_month_id IS NULL OR b.effective_to_month_id >= ?)
+        """,
+        (month_id, month_id, month_id, month_id),
+    ).fetchall()
+
+    card_meta_map = {
+        row["id"]: {
+            "statement_close_day": row["statement_close_day"],
+            "due_day": row["due_day"],
+        }
+        for row in card_rows
+    }
+
+    fixed_transaction_payloads = []
+    for fx in get_active_fixed_expenses():
+        tx_date = compute_transaction_date(month_id, fx["due_day"])
+        payment_method = fx["payment_method"]
+        bank_account_id = fx["bank_account_id"]
+        credit_card_id = None
+        statement_month_id = None
+        due_month_id = None
+        due_date = None
+
+        if payment_method == "credit_card":
+            credit_card_id = fx["credit_card_id"]
+            bank_account_id = None
+            card_meta = card_meta_map.get(credit_card_id)
+            if card_meta is None:
+                raise RuntimeError(
+                    f"Fixed expense '{fx['name']}' references an inactive credit card "
+                    f"for month {month_id}."
+                )
+            close_day = card_meta["statement_close_day"]
+            due_day = card_meta["due_day"]
+            if close_day is None or due_day is None:
+                raise RuntimeError(
+                    f"Credit card for fixed expense '{fx['name']}' is missing "
+                    "statement close day or due day."
+                )
+            statement_month_id, due_month_id, due_date_obj = compute_credit_card_cycle(
+                date.fromisoformat(tx_date),
+                int(close_day),
+                int(due_day),
+            )
+            due_date = due_date_obj.isoformat()
+
+        fixed_transaction_payloads.append(
+            {
+                "date": tx_date,
+                "month_id": month_id,
+                "amount": -abs(fx["amount"]),
+                "category": fx["category"],
+                "subcategory": fx["subcategory"],
+                "payment_method": payment_method,
+                "bank_account_id": bank_account_id,
+                "credit_card_id": credit_card_id,
+                "statement_month_id": statement_month_id,
+                "due_month_id": due_month_id,
+                "due_date": due_date,
+                "note": f"Fixed expense: {fx['name']}",
+                "tx_type": "normal",
+            }
+        )
+
     conn.execute(
         """
         INSERT INTO months (month_id, starting_balance, status)
@@ -320,19 +418,8 @@ def open_month(month_id: str, starting_balance: float) -> None:
     conn.close()
 
     # Materialize fixed expenses as transactions
-    for fx in get_active_fixed_expenses():
-        tx_date = compute_transaction_date(month_id, fx["due_day"])
-
-        add_transaction(
-            date=tx_date,
-            month_id=month_id,
-            amount=-abs(fx["amount"]),
-            category=fx["category"],
-            subcategory=fx["subcategory"],
-            bank_account_id=fx["bank_account_id"],
-            note=f"Fixed expense: {fx['name']}",
-            tx_type="normal",
-        )
+    for payload in fixed_transaction_payloads:
+        add_transaction(**payload)
 
     # Materialize income sources as transactions
     for inc in get_active_income_sources():
