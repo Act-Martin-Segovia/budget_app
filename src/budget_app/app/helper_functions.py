@@ -496,6 +496,56 @@ def get_category_planned(month_id: str, category: str) -> float:
     return income * pct
 
 
+def get_known_subcategories(category: str | None = None) -> list[str]:
+    conn = get_connection()
+    values: set[str] = set()
+
+    category_clause = ""
+    params: tuple[str, ...] = ()
+    if category is not None:
+        category_clause = "AND category = ?"
+        params = (category,)
+
+    tx_rows = conn.execute(
+        f"""
+        SELECT DISTINCT TRIM(subcategory) AS subcategory
+        FROM transactions
+        WHERE subcategory IS NOT NULL
+          AND TRIM(subcategory) <> ''
+          {category_clause}
+        """,
+        params,
+    ).fetchall()
+    values.update(row["subcategory"] for row in tx_rows)
+
+    if category in (None, "Fixed"):
+        fixed_rows = conn.execute(
+            """
+            SELECT DISTINCT TRIM(subcategory) AS subcategory
+            FROM fixed_expenses
+            WHERE active = 1
+              AND subcategory IS NOT NULL
+              AND TRIM(subcategory) <> ''
+            """
+        ).fetchall()
+        values.update(row["subcategory"] for row in fixed_rows)
+
+    if category in (None, "Income"):
+        income_rows = conn.execute(
+            """
+            SELECT DISTINCT TRIM(subcategory) AS subcategory
+            FROM income_sources
+            WHERE active = 1
+              AND subcategory IS NOT NULL
+              AND TRIM(subcategory) <> ''
+            """
+        ).fetchall()
+        values.update(row["subcategory"] for row in income_rows)
+
+    conn.close()
+    return sorted(values, key=str.casefold)
+
+
 def generate_month_options(
     start: date, months_ahead: int = 6
 ) -> list[str]:
