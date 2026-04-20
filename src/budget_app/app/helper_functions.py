@@ -920,6 +920,41 @@ def get_variable_by_payment_method(month_id: str) -> dict[str, float]:
     return {r["payment_method"]: r["total"] for r in rows}
 
 
+def get_subcategory_totals_by_category(
+    month_id: str, categories: list[str]
+) -> dict[str, list[dict[str, float | str]]]:
+    if not categories:
+        return {}
+
+    placeholders = ", ".join("?" for _ in categories)
+    conn = get_connection()
+    rows = conn.execute(
+        f"""
+        SELECT
+            category,
+            COALESCE(NULLIF(TRIM(subcategory), ''), 'Uncategorized') AS subcategory,
+            ABS(SUM(amount)) AS total
+        FROM transactions
+        WHERE month_id = ?
+          AND category IN ({placeholders})
+        GROUP BY category, COALESCE(NULLIF(TRIM(subcategory), ''), 'Uncategorized')
+        ORDER BY category, total DESC, subcategory
+        """,
+        (month_id, *categories),
+    ).fetchall()
+    conn.close()
+
+    breakdown = {category: [] for category in categories}
+    for row in rows:
+        breakdown[row["category"]].append(
+            {
+                "subcategory": row["subcategory"],
+                "total": row["total"],
+            }
+        )
+    return breakdown
+
+
 def get_half_month_cashflow_splits(month_id: str) -> dict[str, dict[str, float]]:
     """
     Return totals split by half-month.
