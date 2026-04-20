@@ -3,7 +3,8 @@ import tempfile
 from datetime import date
 from dateutil.relativedelta import relativedelta
 
-from budget_app.utils import get_repo_root
+from budget_app.utils.billing import compute_credit_card_cycle, month_id_from_date
+from budget_app.utils.paths import get_repo_root
 
 from budget_app.db.db import (
     get_connection,
@@ -15,17 +16,6 @@ ROOT = get_repo_root()
 # ======================================================
 # Helpers
 # ======================================================
-
-
-def month_id_from_date(d: date) -> str:
-    return f"{d.year}-{d.month:02d}"
-
-
-def clamp_day(year: int, month: int, day: int) -> int:
-    last_day = (date(year, month, 1) + relativedelta(months=1, days=-1)).day
-    return min(day, last_day)
-
-
 def current_month_id() -> str:
     return month_id_from_date(date.today())
 
@@ -72,33 +62,6 @@ def get_previous_month_id(month_id: str) -> str:
     year, month = map(int, month_id.split("-"))
     dt = date(year, month, 1) - relativedelta(months=1)
     return f"{dt.year}-{dt.month:02d}"
-
-
-def compute_credit_card_cycle(
-    tx_date: date, statement_close_day: int, due_day: int
-) -> tuple[str, str, date]:
-    """
-    Returns (statement_month_id, due_month_id, due_date).
-    Assumes due month is the month after the statement month.
-    """
-    close_day = clamp_day(tx_date.year, tx_date.month, statement_close_day)
-    if tx_date.day > close_day:
-        stmt_month_date = tx_date + relativedelta(months=1)
-    else:
-        stmt_month_date = tx_date
-
-    statement_month_id = month_id_from_date(stmt_month_date)
-
-    due_month_date = date(stmt_month_date.year, stmt_month_date.month, 1) + relativedelta(
-        months=1
-    )
-    due_day_clamped = clamp_day(due_month_date.year, due_month_date.month, due_day)
-    due_date = date(due_month_date.year, due_month_date.month, due_day_clamped)
-    due_month_id = month_id_from_date(due_date)
-
-    return statement_month_id, due_month_id, due_date
-
-
 # ======================================================
 # Bank Accounts & Credit Cards (Master Data)
 # ======================================================
@@ -547,7 +510,16 @@ def get_fixed_expenses():
     conn = get_connection()
     rows = conn.execute(
         """
-        SELECT id, name, amount, due_day, subcategory, bank_account_id, active
+        SELECT
+            id,
+            name,
+            amount,
+            due_day,
+            subcategory,
+            COALESCE(payment_method, 'debit') AS payment_method,
+            bank_account_id,
+            credit_card_id,
+            active
         FROM fixed_expenses
         WHERE active = 1
         ORDER BY due_day
@@ -557,7 +529,15 @@ def get_fixed_expenses():
     return rows
 
 
-def upsert_fixed_expense(name, amount, due_day, subcategory, bank_account_id):
+def upsert_fixed_expense(
+    name,
+    amount,
+    due_day,
+    subcategory,
+    payment_method,
+    bank_account_id,
+    credit_card_id,
+):
     conn = get_connection()
 
     conn.execute(
@@ -574,11 +554,26 @@ def upsert_fixed_expense(name, amount, due_day, subcategory, bank_account_id):
     conn.execute(
         """
         INSERT INTO fixed_expenses (
-            name, amount, due_day, category, subcategory, bank_account_id
+            name,
+            amount,
+            due_day,
+            category,
+            subcategory,
+            payment_method,
+            bank_account_id,
+            credit_card_id
         )
-        VALUES (?, ?, ?, 'Fixed', ?, ?)
+        VALUES (?, ?, ?, 'Fixed', ?, ?, ?, ?)
         """,
-        (name, amount, due_day, subcategory, bank_account_id),
+        (
+            name,
+            amount,
+            due_day,
+            subcategory,
+            payment_method,
+            bank_account_id,
+            credit_card_id,
+        ),
     )
 
     conn.commit()
@@ -714,12 +709,20 @@ def preview_fixed_expenses_for_month(month_id: str):
     Returns a list of dicts with:
     - date
     - name
-    - category
     - subcategory
     - amount (negative)
+    - payment_method
+    - payment_detail
+    - issue
     """
     year, month = map(int, month_id.split("-"))
     expenses = get_fixed_expenses()
+    account_name_map = {a["id"]: a["name"] for a in get_bank_accounts()}
+    credit_cards = get_credit_cards()
+    credit_card_name_map = {c["id"]: c["name"] for c in credit_cards}
+    active_cards_for_month = {
+        c["id"]: c for c in get_active_credit_cards_for_month(month_id)
+    }
 
     preview = []
     total = 0.0
@@ -737,6 +740,41 @@ def preview_fixed_expenses_for_month(month_id: str):
 
         amount = -fx["amount"]  # expenses are negative
         total += amount
+        payment_method = fx["payment_method"]
+        payment_detail = "Debit"
+        issue = None
+
+        if payment_method == "credit_card":
+            card_id = fx["credit_card_id"]
+            card_name = credit_card_name_map.get(card_id, "—")
+            payment_detail = f"Credit card · {card_name}"
+
+            active_card = active_cards_for_month.get(card_id)
+            if card_id is None:
+                issue = "No credit card selected."
+            elif active_card is None:
+                issue = "Selected credit card is not active for this month."
+            else:
+                close_day = active_card["statement_close_day"]
+                card_due_day = active_card["due_day"]
+                if close_day is None or card_due_day is None:
+                    issue = (
+                        "Selected credit card is missing statement close day or due day."
+                    )
+                else:
+                    _, due_month_id, due_date = compute_credit_card_cycle(
+                        tx_date,
+                        int(close_day),
+                        int(card_due_day),
+                    )
+                    payment_detail = (
+                        f"Credit card · {card_name} · due {due_date.isoformat()} "
+                        f"({due_month_id})"
+                    )
+        else:
+            account_name = account_name_map.get(fx["bank_account_id"])
+            if account_name:
+                payment_detail = f"Debit · {account_name}"
 
         preview.append(
             {
@@ -744,6 +782,9 @@ def preview_fixed_expenses_for_month(month_id: str):
                 "name": fx["name"],
                 "subcategory": fx["subcategory"],
                 "amount": amount,
+                "payment_method": payment_method,
+                "payment_detail": payment_detail,
+                "issue": issue,
             }
         )
 
