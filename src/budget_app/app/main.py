@@ -4,6 +4,7 @@ from pathlib import Path
 from datetime import date
 from collections.abc import Mapping
 
+import altair as alt
 import streamlit as st
 import bcrypt
 
@@ -65,7 +66,7 @@ from budget_app.app.helper_functions import (
     preview_income_for_month,
     get_transactions_for_month,
     get_variable_by_payment_method,
-    get_half_month_cashflow_splits,
+    get_subcategory_totals_by_category,
     get_oldest_open_month,
     is_valid_sqlite_db,
 )
@@ -776,61 +777,107 @@ with dashboard_tab:
 
             st.divider()
             st.markdown(
-                '<div class="subsection-header">Mid Month Cashflow</div>',
+                '<div class="subsection-header">Objective Breakdown</div>',
                 unsafe_allow_html=True,
             )
-            splits = get_half_month_cashflow_splits(selected_month)
-            header_cols = st.columns([1.2, 1.2, 1.2, 1.2, 1.2, 1.2])
-            header_labels = [
-                "Period",
-                "Income",
-                "Fixed expenses",
-                "Variable expenses",
-                "Savings",
-                "Balance",
+            chart_categories = [
+                category for category in ["Fixed", "Variable", "Savings"] if category in objectives
             ]
-            for col, label in zip(header_cols, header_labels):
-                col.markdown(f'<div class="alloc-label">{label}</div>', unsafe_allow_html=True)
+            breakdown = get_subcategory_totals_by_category(selected_month, chart_categories)
 
-            periods = [("Day 1–15", "first"), ("Day 16–eom", "second")]
-            for label, key in periods:
-                income = splits.get("Income", {}).get(key, 0.0)
-                fixed = splits.get("Fixed", {}).get(key, 0.0)
-                variable = splits.get("Variable", {}).get(key, 0.0)
-                savings = splits.get("Savings", {}).get(key, 0.0)
-                balance = income - fixed - variable - savings
-                balance_class = "good" if balance >= 0 else "bad"
-                if balance < 0:
-                    balance_icon = "🚨"
-                elif balance < 100:
-                    balance_icon = "⚠️"
-                else:
-                    balance_icon = "✅"
+            objective_rows = []
+            actual_rows = []
+            for category in chart_categories:
+                objective_pct = objectives[category]
+                objective_amount = income * objective_pct
+                objective_rows.append(
+                    {
+                        "category": category,
+                        "objective_pct": objective_pct,
+                        "objective_amount": objective_amount,
+                    }
+                )
+                for item in breakdown.get(category, []):
+                    amount = float(item["total"])
+                    actual_rows.append(
+                        {
+                            "category": category,
+                            "subcategory": item["subcategory"],
+                            "amount": amount,
+                            "pct_of_income": (amount / income) if income else 0.0,
+                            "objective_amount": objective_amount,
+                            "objective_pct": objective_pct,
+                        }
+                    )
 
-                c1, c2, c3, c4, c5, c6 = st.columns([1.2, 1.2, 1.2, 1.2, 1.2, 1.2])
-                c1.markdown(f'<div class="alloc-title">{label}</div>', unsafe_allow_html=True)
-                c2.markdown(
-                    f'<div class="alloc-value inflow">${income:,.2f}</div>',
-                    unsafe_allow_html=True,
+            objective_chart = alt.Chart(alt.Data(values=objective_rows)).mark_bar(
+                color="#cbd5e1",
+                opacity=0.7,
+                size=78,
+            ).encode(
+                x=alt.X(
+                    "category:N",
+                    sort=chart_categories,
+                    title=None,
+                    axis=alt.Axis(labelAngle=0, labelFontSize=13),
+                ),
+                y=alt.Y(
+                    "objective_pct:Q",
+                    title="% of income",
+                    axis=alt.Axis(format=".0%"),
+                ),
+                tooltip=[
+                    alt.Tooltip("category:N", title="Category"),
+                    alt.Tooltip("objective_amount:Q", title="Objective", format=",.2f"),
+                    alt.Tooltip("objective_pct:Q", title="% of income", format=".1%"),
+                ],
+            )
+
+            chart_layers = [objective_chart]
+
+            if actual_rows:
+                subcategory_palette = [
+                    "#fef3c7",
+                    "#fde68a",
+                    "#fcd34d",
+                    "#fbbf24",
+                    "#f59e0b",
+                    "#d97706",
+                    "#b45309",
+                    "#92400e",
+                    "#facc15",
+                    "#fb923c",
+                ]
+                actual_chart = alt.Chart(alt.Data(values=actual_rows)).mark_bar(
+                    size=58
+                ).encode(
+                    x=alt.X("category:N", sort=chart_categories, title=None),
+                    y=alt.Y("pct_of_income:Q", title="% of income"),
+                    color=alt.Color(
+                        "subcategory:N",
+                        title="Subcategory",
+                        scale=alt.Scale(range=subcategory_palette),
+                    ),
+                    order=alt.Order("pct_of_income:Q", sort="descending"),
+                    tooltip=[
+                        alt.Tooltip("category:N", title="Category"),
+                        alt.Tooltip("subcategory:N", title="Subcategory"),
+                        alt.Tooltip("amount:Q", title="Actual", format=",.2f"),
+                        alt.Tooltip("pct_of_income:Q", title="% of income", format=".1%"),
+                        alt.Tooltip("objective_amount:Q", title="Objective", format=",.2f"),
+                        alt.Tooltip("objective_pct:Q", title="Objective %", format=".1%"),
+                    ],
                 )
-                c3.markdown(
-                    f'<div class="alloc-value outflow">${fixed:,.2f}</div>',
-                    unsafe_allow_html=True,
-                )
-                c4.markdown(
-                    f'<div class="alloc-value outflow">${variable:,.2f}</div>',
-                    unsafe_allow_html=True,
-                )
-                c5.markdown(
-                    f'<div class="alloc-value outflow">${savings:,.2f}</div>',
-                    unsafe_allow_html=True,
-                )
-                c6.markdown(
-                    f'<div class="alloc-value {balance_class}">'
-                    f'${balance:,.2f} {balance_icon}'
-                    f'</div>',
-                    unsafe_allow_html=True,
-                )
+                chart_layers.append(actual_chart)
+
+            chart = alt.layer(*chart_layers).resolve_scale(
+                y="shared", color="independent"
+            ).properties(height=340)
+            st.altair_chart(chart, use_container_width=True)
+            st.caption(
+                "Light bar = category objective. Colored stack = actual subcategory "
+                "usage. Bars can extend above the target when the objective is exceeded."
+            )
 
             st.divider()
             st.markdown(
