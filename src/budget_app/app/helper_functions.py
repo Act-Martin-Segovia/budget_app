@@ -290,6 +290,224 @@ def deactivate_credit_card(card_id: int) -> None:
     conn.close()
 
 
+def get_credit_card_spending_summary(month_id: str) -> list[dict[str, float | str | int]]:
+    conn = get_connection()
+    rows = conn.execute(
+        """
+        SELECT
+            c.id AS credit_card_id,
+            c.name AS credit_card_name,
+            b.name AS bank_account_name,
+            COALESCE(SUM(ABS(t.amount)), 0) AS spent
+        FROM credit_cards c
+        JOIN bank_accounts b ON b.id = c.bank_account_id
+        LEFT JOIN transactions t
+          ON t.credit_card_id = c.id
+         AND t.month_id = ?
+         AND t.payment_method = 'credit_card'
+        WHERE c.active = 1
+          AND b.active = 1
+          AND c.effective_from_month_id <= ?
+          AND (c.effective_to_month_id IS NULL OR c.effective_to_month_id >= ?)
+          AND b.effective_from_month_id <= ?
+          AND (b.effective_to_month_id IS NULL OR b.effective_to_month_id >= ?)
+        GROUP BY c.id, c.name, b.name
+        ORDER BY spent DESC, c.name
+        """,
+        (month_id, month_id, month_id, month_id, month_id),
+    ).fetchall()
+    conn.close()
+    return [
+        {
+            "credit_card_id": row["credit_card_id"],
+            "credit_card_name": row["credit_card_name"],
+            "bank_account_name": row["bank_account_name"],
+            "spent": row["spent"],
+        }
+        for row in rows
+    ]
+
+
+def get_credit_card_spending_by_subcategory(
+    month_id: str,
+) -> list[dict[str, float | str]]:
+    conn = get_connection()
+    rows = conn.execute(
+        """
+        SELECT
+            c.name AS credit_card_name,
+            COALESCE(NULLIF(TRIM(t.subcategory), ''), 'Uncategorized') AS subcategory,
+            ABS(SUM(t.amount)) AS spent
+        FROM transactions t
+        JOIN credit_cards c ON c.id = t.credit_card_id
+        WHERE t.month_id = ?
+          AND t.payment_method = 'credit_card'
+        GROUP BY c.id, c.name, COALESCE(NULLIF(TRIM(t.subcategory), ''), 'Uncategorized')
+        ORDER BY c.name, spent DESC, subcategory
+        """,
+        (month_id,),
+    ).fetchall()
+    conn.close()
+    return [
+        {
+            "credit_card_name": row["credit_card_name"],
+            "subcategory": row["subcategory"],
+            "spent": row["spent"],
+        }
+        for row in rows
+    ]
+
+
+# ======================================================
+# Savings / Investment Accounts
+# ======================================================
+
+
+def get_savings_accounts() -> list[sqlite3.Row]:
+    conn = get_connection()
+    rows = conn.execute(
+        """
+        SELECT
+            s.id,
+            s.name,
+            s.institution,
+            s.account_type,
+            s.linked_bank_account_id,
+            s.active,
+            s.effective_from_month_id,
+            s.effective_to_month_id,
+            b.name AS linked_bank_account_name
+        FROM savings_accounts s
+        LEFT JOIN bank_accounts b ON b.id = s.linked_bank_account_id
+        ORDER BY s.name
+        """
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def get_active_savings_accounts_for_month(month_id: str) -> list[sqlite3.Row]:
+    conn = get_connection()
+    rows = conn.execute(
+        """
+        SELECT
+            s.id,
+            s.name,
+            s.institution,
+            s.account_type,
+            s.linked_bank_account_id,
+            b.name AS linked_bank_account_name
+        FROM savings_accounts s
+        LEFT JOIN bank_accounts b ON b.id = s.linked_bank_account_id
+        WHERE s.active = 1
+          AND s.effective_from_month_id <= ?
+          AND (s.effective_to_month_id IS NULL OR s.effective_to_month_id >= ?)
+        ORDER BY s.name
+        """,
+        (month_id, month_id),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def has_savings_accounts() -> bool:
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT 1 FROM savings_accounts WHERE active = 1 LIMIT 1"
+    ).fetchone()
+    conn.close()
+    return row is not None
+
+
+def create_savings_account(
+    name: str,
+    institution: str | None,
+    account_type: str,
+    linked_bank_account_id: int | None,
+    effective_from_month_id: str,
+    effective_to_month_id: str | None,
+    active: int = 1,
+) -> None:
+    conn = get_connection()
+    conn.execute(
+        """
+        INSERT INTO savings_accounts (
+            name,
+            institution,
+            account_type,
+            linked_bank_account_id,
+            active,
+            effective_from_month_id,
+            effective_to_month_id
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            name,
+            institution,
+            account_type,
+            linked_bank_account_id,
+            active,
+            effective_from_month_id,
+            effective_to_month_id,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def update_savings_account(
+    savings_account_id: int,
+    name: str,
+    institution: str | None,
+    account_type: str,
+    linked_bank_account_id: int | None,
+    effective_from_month_id: str,
+    effective_to_month_id: str | None,
+    active: int = 1,
+) -> None:
+    conn = get_connection()
+    conn.execute(
+        """
+        UPDATE savings_accounts
+        SET name = ?,
+            institution = ?,
+            account_type = ?,
+            linked_bank_account_id = ?,
+            active = ?,
+            effective_from_month_id = ?,
+            effective_to_month_id = ?
+        WHERE id = ?
+        """,
+        (
+            name,
+            institution,
+            account_type,
+            linked_bank_account_id,
+            active,
+            effective_from_month_id,
+            effective_to_month_id,
+            savings_account_id,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def deactivate_savings_account(savings_account_id: int) -> None:
+    conn = get_connection()
+    conn.execute(
+        """
+        UPDATE savings_accounts
+        SET active = 0
+        WHERE id = ?
+        """,
+        (savings_account_id,),
+    )
+    conn.commit()
+    conn.close()
+
+
 # ======================================================
 # Account Balances & Coverage
 # ======================================================
@@ -500,7 +718,7 @@ def get_known_subcategories(category: str | None = None) -> list[str]:
     conn = get_connection()
     values: set[str] = set()
 
-    category_clause = ""
+    category_clause = "AND category <> 'Transfer'"
     params: tuple[str, ...] = ()
     if category is not None:
         category_clause = "AND category = ?"
@@ -892,6 +1110,7 @@ def get_transactions_for_month(month_id: str):
             payment_method,
             bank_account_id,
             credit_card_id,
+            savings_account_id,
             note
         FROM transactions
         WHERE month_id = ?
@@ -918,6 +1137,149 @@ def get_variable_by_payment_method(month_id: str) -> dict[str, float]:
     conn.close()
 
     return {r["payment_method"]: r["total"] for r in rows}
+
+
+def get_savings_balance_series() -> list[dict[str, float | str]]:
+    savings_accounts = get_savings_accounts()
+    if not savings_accounts:
+        return []
+
+    conn = get_connection()
+    movement_rows = conn.execute(
+        """
+        SELECT
+            m.date,
+            m.savings_account_id,
+            m.amount,
+            s.name AS savings_account_name
+        FROM savings_movements m
+        JOIN savings_accounts s ON s.id = m.savings_account_id
+        ORDER BY m.date, m.id
+        """
+    ).fetchall()
+    legacy_rows = conn.execute(
+        """
+        SELECT
+            date,
+            COALESCE(NULLIF(TRIM(subcategory), ''), '') AS subcategory,
+            amount
+        FROM transactions
+        WHERE category = 'Savings'
+          AND savings_account_id IS NULL
+          AND subcategory IS NOT NULL
+          AND TRIM(subcategory) <> ''
+        ORDER BY date, id
+        """
+    ).fetchall()
+    conn.close()
+
+    legacy_by_name = {
+        str(account["name"]).strip().casefold(): {
+            "id": account["id"],
+            "name": account["name"],
+        }
+        for account in savings_accounts
+    }
+
+    normalized_rows: list[dict[str, float | str | int]] = [
+        {
+            "date": row["date"],
+            "savings_account_id": row["savings_account_id"],
+            "savings_account_name": row["savings_account_name"],
+            "amount": row["amount"],
+        }
+        for row in movement_rows
+    ]
+
+    for row in legacy_rows:
+        match = legacy_by_name.get(str(row["subcategory"]).strip().casefold())
+        if match is None:
+            continue
+        normalized_rows.append(
+            {
+                "date": row["date"],
+                "savings_account_id": match["id"],
+                "savings_account_name": match["name"],
+                "amount": abs(row["amount"]),
+            }
+        )
+
+    normalized_rows.sort(
+        key=lambda item: (str(item["date"]), str(item["savings_account_name"]))
+    )
+
+    running_balances: dict[int, float] = {
+        int(account["id"]): 0.0 for account in savings_accounts
+    }
+    series: list[dict[str, float | str]] = []
+    for row in normalized_rows:
+        account_id = int(row["savings_account_id"])
+        running_balances[account_id] += float(row["amount"])
+        series.append(
+            {
+                "date": row["date"],
+                "savings_account_name": row["savings_account_name"],
+                "balance": running_balances[account_id],
+                "movement_amount": float(row["amount"]),
+            }
+        )
+    return series
+
+
+def get_current_savings_balances() -> list[dict[str, float | str]]:
+    conn = get_connection()
+    rows = conn.execute(
+        """
+        SELECT
+            s.name AS savings_account_name,
+            s.institution,
+            s.account_type,
+            COALESCE(SUM(m.amount), 0) AS balance
+        FROM savings_accounts s
+        LEFT JOIN savings_movements m ON m.savings_account_id = s.id
+        WHERE s.active = 1
+        GROUP BY s.id, s.name, s.institution, s.account_type
+        ORDER BY balance DESC, s.name
+        """
+    ).fetchall()
+    conn.close()
+
+    return [
+        {
+            "savings_account_name": row["savings_account_name"],
+            "institution": row["institution"] or "",
+            "account_type": row["account_type"],
+            "balance": row["balance"],
+        }
+        for row in rows
+    ]
+
+
+def get_monthly_savings_contributions() -> list[dict[str, float | str]]:
+    conn = get_connection()
+    rows = conn.execute(
+        """
+        SELECT
+            substr(m.date, 1, 7) AS month_id,
+            s.name AS savings_account_name,
+            SUM(m.amount) AS contribution_amount
+        FROM savings_movements m
+        JOIN savings_accounts s ON s.id = m.savings_account_id
+        WHERE m.movement_type = 'contribution'
+        GROUP BY substr(m.date, 1, 7), s.name
+        ORDER BY month_id, s.name
+        """
+    ).fetchall()
+    conn.close()
+
+    return [
+        {
+            "month_id": row["month_id"],
+            "savings_account_name": row["savings_account_name"],
+            "contribution_amount": row["contribution_amount"],
+        }
+        for row in rows
+    ]
 
 
 def get_subcategory_totals_by_category(
