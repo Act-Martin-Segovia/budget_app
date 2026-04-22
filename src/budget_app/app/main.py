@@ -2,6 +2,7 @@ import sys
 import json
 from pathlib import Path
 from datetime import date
+from html import escape
 from collections.abc import Mapping
 
 import altair as alt
@@ -17,6 +18,8 @@ if str(SRC_ROOT) not in sys.path:
 
 
 from budget_app.db.db import (
+    add_savings_funded_expense,
+    add_savings_movement,
     add_transaction,
     close_month,
     init_db,
@@ -46,12 +49,17 @@ from budget_app.app.helper_functions import (
     deactivate_bank_account,
     get_credit_cards,
     get_active_credit_cards_for_month,
+    get_active_savings_accounts_for_month,
     create_credit_card,
+    create_savings_account,
     update_credit_card,
+    update_savings_account,
     deactivate_credit_card,
+    deactivate_savings_account,
     get_account_ending_balances,
     set_account_month_balances,
-    get_account_coverage_snapshot,
+    get_credit_card_spending_summary,
+    get_credit_card_spending_by_subcategory,
     get_fixed_expenses,
     upsert_fixed_expense,
     deactivate_fixed_expense,
@@ -59,6 +67,9 @@ from budget_app.app.helper_functions import (
     upsert_income_source,
     deactivate_income_source,
     upsert_objective,
+    get_savings_accounts,
+    get_current_savings_balances,
+    get_monthly_savings_contributions,
     has_fixed_expenses,
     has_income_sources,
     has_objectives,
@@ -133,6 +144,15 @@ st.markdown(
         text-transform: uppercase;
         color: #e5e7eb;
         margin: 1.6rem 0 0.8rem 0;
+    }
+
+    .panel-header {
+        font-size: 1.05rem;
+        font-weight: 700;
+        letter-spacing: 0.07em;
+        text-transform: uppercase;
+        color: #cbd5e1;
+        margin: 0.4rem 0 0.75rem 0;
     }
 
     .alloc-row {
@@ -221,6 +241,77 @@ st.markdown(
         margin: 0;
         font-size: 1.9rem;
         font-weight: 700;
+    }
+
+    .savings-summary-card {
+        background: linear-gradient(135deg, #111827, #0f172a);
+        border: 1px solid rgba(253, 230, 138, 0.22);
+        border-radius: 18px;
+        padding: 1.2rem 1.4rem;
+        box-shadow: 0 12px 30px rgba(0,0,0,0.38);
+        margin-bottom: 1.4rem;
+        margin-left: auto;
+        margin-right: auto;
+        max-width: 520px;
+    }
+
+    .savings-summary-row {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        align-items: center;
+        gap: 1rem;
+        padding: 0.85rem 0;
+        border-bottom: 1px solid rgba(253, 230, 138, 0.18);
+    }
+
+    .savings-summary-row:last-child {
+        border-bottom: none;
+    }
+
+    .savings-account-name {
+        color: #e5e7eb;
+        font-size: 1.05rem;
+        font-weight: 650;
+    }
+
+    .savings-account-meta {
+        color: #9ca3af;
+        font-size: 0.78rem;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        margin-top: 0.15rem;
+    }
+
+    .savings-account-value {
+        color: #fde68a;
+        font-size: 1.1rem;
+        font-weight: 750;
+        white-space: nowrap;
+    }
+
+    .savings-total-row {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        align-items: center;
+        gap: 1rem;
+        padding-top: 1rem;
+        margin-top: 0.2rem;
+        border-top: 2px solid rgba(253, 230, 138, 0.38);
+    }
+
+    .savings-total-label {
+        color: #fef3c7;
+        font-size: 1rem;
+        font-weight: 800;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+    }
+
+    .savings-total-value {
+        color: #22c55e;
+        font-size: 1.45rem;
+        font-weight: 850;
+        white-space: nowrap;
     }
 
     /* ---- Value coloring ---- */
@@ -375,8 +466,107 @@ if "editing_account" not in st.session_state:
 if "editing_card" not in st.session_state:
     st.session_state.editing_card = None
 
+if "editing_savings_account" not in st.session_state:
+    st.session_state.editing_savings_account = None
+
 if "confirm_close_month_for" not in st.session_state:
     st.session_state.confirm_close_month_for = None
+
+
+def submit_budget_transaction(payload: dict) -> None:
+    category = payload["category"]
+    tx_date = payload["date"]
+    month_id = payload["month_id"]
+    amount = abs(float(payload["amount"]))
+    subcategory = payload.get("subcategory")
+    note = payload.get("note", "")
+
+    if category == "Income":
+        add_transaction(
+            date=tx_date,
+            month_id=month_id,
+            amount=amount,
+            category=category,
+            subcategory=subcategory,
+            payment_method=None,
+            bank_account_id=payload.get("bank_account_id"),
+            credit_card_id=None,
+            savings_account_id=None,
+            statement_month_id=None,
+            due_month_id=None,
+            due_date=None,
+            note=note,
+        )
+        return
+
+    if category == "Savings":
+        tx_id = add_transaction(
+            date=tx_date,
+            month_id=month_id,
+            amount=-amount,
+            category=category,
+            subcategory=subcategory,
+            payment_method="debit",
+            bank_account_id=payload.get("bank_account_id"),
+            credit_card_id=None,
+            savings_account_id=payload.get("savings_account_id"),
+            statement_month_id=None,
+            due_month_id=None,
+            due_date=None,
+            note=note,
+        )
+        add_savings_movement(
+            date=tx_date,
+            month_id=month_id,
+            savings_account_id=payload["savings_account_id"],
+            amount=amount,
+            movement_type="contribution",
+            linked_transaction_id=tx_id,
+            note=note,
+        )
+        return
+
+    if (
+        payload.get("payment_method") == "Debit"
+        and payload.get("debit_funding_source") == "Savings account"
+    ):
+        add_savings_funded_expense(
+            date=tx_date,
+            month_id=month_id,
+            amount=amount,
+            category=category,
+            subcategory=subcategory,
+            bank_account_id=payload["settlement_bank_account_id"],
+            savings_account_id=payload["savings_account_id"],
+            note=note,
+        )
+        return
+
+    add_transaction(
+        date=tx_date,
+        month_id=month_id,
+        amount=-amount,
+        category=category,
+        subcategory=subcategory,
+        payment_method=payload["payment_method"].lower().replace(" ", "_"),
+        bank_account_id=payload.get("bank_account_id")
+        if payload.get("payment_method") == "Debit"
+        else None,
+        credit_card_id=payload.get("credit_card_id")
+        if payload.get("payment_method") == "Credit card"
+        else None,
+        savings_account_id=payload.get("savings_account_id"),
+        statement_month_id=payload.get("statement_month_id")
+        if payload.get("payment_method") == "Credit card"
+        else None,
+        due_month_id=payload.get("due_month_id")
+        if payload.get("payment_method") == "Credit card"
+        else None,
+        due_date=payload.get("due_date")
+        if payload.get("payment_method") == "Credit card"
+        else None,
+        note=note,
+    )
 
 dashboard_tab, trx_tab, settings_tab, backup_data_tab = st.tabs(
     ["📊 Main Dashboard", "📋 Transactions", "⚙️ Settings", "💾 Restore Backup Data"]
@@ -811,20 +1001,35 @@ with dashboard_tab:
                     )
 
             objective_chart = alt.Chart(alt.Data(values=objective_rows)).mark_bar(
-                color="#cbd5e1",
-                opacity=0.7,
-                size=78,
+                color="#e5e7eb",
+                opacity=0.34,
+                size=72,
+                cornerRadiusTopLeft=6,
+                cornerRadiusTopRight=6,
             ).encode(
                 x=alt.X(
                     "category:N",
                     sort=chart_categories,
                     title=None,
-                    axis=alt.Axis(labelAngle=0, labelFontSize=13),
+                    axis=alt.Axis(
+                        labelAngle=0,
+                        labelColor="#d1d5db",
+                        labelFontSize=12,
+                        tickSize=0,
+                        domain=False,
+                    ),
                 ),
                 y=alt.Y(
                     "objective_pct:Q",
-                    title="% of income",
-                    axis=alt.Axis(format=".0%"),
+                    title=None,
+                    axis=alt.Axis(
+                        format=".0%",
+                        labelColor="#9ca3af",
+                        labelFontSize=11,
+                        gridColor="rgba(255,255,255,0.08)",
+                        tickSize=0,
+                        domain=False,
+                    ),
                 ),
                 tooltip=[
                     alt.Tooltip("category:N", title="Category"),
@@ -849,14 +1054,25 @@ with dashboard_tab:
                     "#fb923c",
                 ]
                 actual_chart = alt.Chart(alt.Data(values=actual_rows)).mark_bar(
-                    size=58
+                    size=52,
+                    cornerRadiusTopLeft=6,
+                    cornerRadiusTopRight=6,
                 ).encode(
                     x=alt.X("category:N", sort=chart_categories, title=None),
-                    y=alt.Y("pct_of_income:Q", title="% of income"),
+                    y=alt.Y("pct_of_income:Q", title=None),
                     color=alt.Color(
                         "subcategory:N",
-                        title="Subcategory",
+                        title=None,
                         scale=alt.Scale(range=subcategory_palette),
+                        legend=alt.Legend(
+                            orient="bottom",
+                            direction="horizontal",
+                            labelColor="#d1d5db",
+                            labelFontSize=11,
+                            symbolType="circle",
+                            symbolSize=90,
+                            title=None,
+                        ),
                     ),
                     order=alt.Order("pct_of_income:Q", sort="descending"),
                     tooltip=[
@@ -872,8 +1088,10 @@ with dashboard_tab:
 
             chart = alt.layer(*chart_layers).resolve_scale(
                 y="shared", color="independent"
-            ).properties(height=340)
-            st.altair_chart(chart, use_container_width=True)
+            ).properties(width=760, height=340).configure_view(strokeWidth=0)
+            chart_left, chart_center, chart_right = st.columns([1, 5, 1])
+            with chart_center:
+                st.altair_chart(chart, use_container_width=False)
             st.caption(
                 "Light bar = category objective. Colored stack = actual subcategory "
                 "usage. Bars can extend above the target when the objective is exceeded."
@@ -881,83 +1099,274 @@ with dashboard_tab:
 
             st.divider()
             st.markdown(
-                '<div class="subsection-header">Account Coverage</div>',
+                '<div class="subsection-header">Savings & Investments</div>',
                 unsafe_allow_html=True,
             )
-            coverage = get_account_coverage_snapshot(selected_month)
-            if not coverage:
-                st.info("No account data available for this month.")
-            else:
-                header_cols = st.columns([2, 1.2, 1.2, 1.2])
-                header_labels = [
-                    "Bank account",
-                    "Projected balance",
-                    "Card due",
-                    "Shortfall",
-                ]
-                for col, label in zip(header_cols, header_labels):
-                    col.markdown(
-                        f'<div class="alloc-label">{label}</div>',
-                        unsafe_allow_html=True,
+            savings_palette = [
+                "#fde68a",
+                "#fcd34d",
+                "#fbbf24",
+                "#f59e0b",
+                "#d97706",
+                "#b45309",
+            ]
+
+            current_balances = get_current_savings_balances()
+            contribution_rows = get_monthly_savings_contributions()
+
+            balance_col, contribution_col = st.columns([1, 1.35])
+            with balance_col:
+                st.markdown(
+                    '<div class="panel-header">Current Balances</div>',
+                    unsafe_allow_html=True,
+                )
+                if not current_balances:
+                    st.info("No savings or investment accounts defined yet.")
+                else:
+                    total_savings_balance = sum(
+                        float(row["balance"]) for row in current_balances
+                    )
+                    account_rows = []
+                    for row in current_balances:
+                        account_name = escape(str(row["savings_account_name"]))
+                        account_type = escape(str(row["account_type"]).title())
+                        institution = escape(str(row["institution"] or ""))
+                        meta_parts = [
+                            part for part in [institution, account_type] if part
+                        ]
+                        account_meta = escape(" · ".join(meta_parts))
+                        account_rows.append(
+                            '<div class="savings-summary-row">'
+                            "<div>"
+                            f'<div class="savings-account-name">{account_name}</div>'
+                            f'<div class="savings-account-meta">{account_meta}</div>'
+                            "</div>"
+                            f'<div class="savings-account-value">$ {float(row["balance"]):,.0f}</div>'
+                            "</div>"
+                        )
+                    account_rows_html = "".join(account_rows)
+                    summary_html = (
+                        '<div class="savings-summary-card">'
+                        f"{account_rows_html}"
+                        '<div class="savings-total-row">'
+                        '<div class="savings-total-label">Total</div>'
+                        f'<div class="savings-total-value">$ {total_savings_balance:,.0f}</div>'
+                        "</div>"
+                        "</div>"
+                    )
+                    st.markdown(summary_html, unsafe_allow_html=True)
+                    st.caption(
+                        "Balances include opening balances, contributions, and withdrawals."
                     )
 
-                for row in coverage:
-                    projected = row["projected_balance"]
-                    due = row["card_due"]
-                    shortfall = row["shortfall"]
-                    cushion = projected - due
-                    if cushion < 0:
-                        short_icon = "🚨"
-                    elif cushion < 100:
-                        short_icon = "⚠️"
-                    else:
-                        short_icon = "✅"
-                    short_class = "bad" if shortfall > 0 else "good"
-                    c1, c2, c3, c4 = st.columns([2, 1.2, 1.2, 1.2])
-                    c1.markdown(
-                        f'<div class="alloc-title">{row["bank_account_name"]}</div>',
-                        unsafe_allow_html=True,
+            with contribution_col:
+                st.markdown(
+                    '<div class="panel-header">Contributions By Month</div>',
+                    unsafe_allow_html=True,
+                )
+                if not contribution_rows:
+                    st.info("No savings contributions recorded yet.")
+                else:
+                    contribution_chart = (
+                        alt.Chart(alt.Data(values=contribution_rows))
+                        .mark_bar(
+                            cornerRadiusTopLeft=6,
+                            cornerRadiusTopRight=6,
+                            size=48,
+                        )
+                        .encode(
+                            x=alt.X(
+                                "month_id:N",
+                                title=None,
+                                axis=alt.Axis(
+                                    labelAngle=0,
+                                    labelColor="#d1d5db",
+                                    labelFontSize=12,
+                                    tickSize=0,
+                                    domain=False,
+                                ),
+                            ),
+                            y=alt.Y(
+                                "contribution_amount:Q",
+                                title=None,
+                                axis=alt.Axis(
+                                    format="~s",
+                                    labelColor="#9ca3af",
+                                    labelFontSize=11,
+                                    gridColor="rgba(255,255,255,0.08)",
+                                    tickSize=0,
+                                    domain=False,
+                                ),
+                            ),
+                            color=alt.Color(
+                                "savings_account_name:N",
+                                title=None,
+                                scale=alt.Scale(range=savings_palette),
+                                legend=alt.Legend(
+                                    orient="bottom",
+                                    direction="horizontal",
+                                    labelColor="#d1d5db",
+                                    labelFontSize=11,
+                                    symbolType="circle",
+                                    symbolSize=90,
+                                    title=None,
+                                ),
+                            ),
+                            order=alt.Order("contribution_amount:Q", sort="descending"),
+                            tooltip=[
+                                alt.Tooltip("month_id:N", title="Month"),
+                                alt.Tooltip(
+                                    "savings_account_name:N",
+                                    title="Savings account",
+                                ),
+                                alt.Tooltip(
+                                    "contribution_amount:Q",
+                                    title="Contribution",
+                                    format=",.2f",
+                                ),
+                            ],
+                        )
+                        .properties(width=560, height=320)
+                        .configure_view(strokeWidth=0)
+                        .configure_axis(labelFont="sans-serif", titleFont="sans-serif")
                     )
-                    c2.markdown(
-                        f'<div class="alloc-value">${projected:,.2f}</div>',
-                        unsafe_allow_html=True,
+                    contribution_left, contribution_center, contribution_right = (
+                        st.columns([1, 6, 1])
                     )
-                    c3.markdown(
-                        f'<div class="alloc-value">${due:,.2f}</div>',
-                        unsafe_allow_html=True,
-                    )
-                    c4.markdown(
-                        f'<div class="alloc-value {short_class}">'
-                        f'${shortfall:,.2f} {short_icon}'
-                        f'</div>',
-                        unsafe_allow_html=True,
+                    with contribution_center:
+                        st.altair_chart(
+                            contribution_chart,
+                            use_container_width=False,
+                        )
+                    st.caption(
+                        "Opening balances are excluded so backfills do not appear as monthly savings."
                     )
 
-                total_shortfall = sum(r["shortfall"] for r in coverage)
-                if total_shortfall > 0:
-                    donor = max(coverage, key=lambda r: r["projected_balance"])
-                    receiver = max(coverage, key=lambda r: r["shortfall"])
-                    if donor["projected_balance"] > 0:
-                        donor_msg = (
-                            f"Suggested source: {donor['bank_account_name']} "
-                            f"(projected ${donor['projected_balance']:,.2f})."
-                        )
-                        receiver_msg = (
-                            f"Top shortfall: {receiver['bank_account_name']} "
-                            f"(${receiver['shortfall']:,.2f})."
-                        )
-                        suggestion = f"{donor_msg}\n\n{receiver_msg}"
-                    else:
-                        suggestion = (
-                            "No account has a positive projected balance to cover it."
-                        )
-                    st.write("")
-                    st.warning(
-                        f"Total shortfall across accounts: ${total_shortfall:,.2f}.\n"
+            st.divider()
+            st.markdown(
+                '<div class="subsection-header">Credit Card Details</div>',
+                unsafe_allow_html=True,
+            )
+            credit_summary = get_credit_card_spending_summary(selected_month)
+            credit_breakdown = get_credit_card_spending_by_subcategory(selected_month)
+
+            card_summary_col, card_chart_col = st.columns([1, 1.35])
+            with card_summary_col:
+                st.markdown(
+                    '<div class="panel-header">Current Month Spending</div>',
+                    unsafe_allow_html=True,
+                )
+                if not credit_summary:
+                    st.info("No active credit cards for this month.")
+                else:
+                    total_credit_spent = sum(
+                        float(row["spent"]) for row in credit_summary
                     )
-                    st.warning(
-                        f"Consider transferring funds.\n\n{suggestion}"
+                    card_rows = []
+                    for row in credit_summary:
+                        card_name = escape(str(row["credit_card_name"]))
+                        bank_name = escape(str(row["bank_account_name"]))
+                        card_rows.append(
+                            '<div class="savings-summary-row">'
+                            "<div>"
+                            f'<div class="savings-account-name">{card_name}</div>'
+                            f'<div class="savings-account-meta">Paid from {bank_name}</div>'
+                            "</div>"
+                            f'<div class="savings-account-value">$ {float(row["spent"]):,.0f}</div>'
+                            "</div>"
+                        )
+                    card_rows_html = "".join(card_rows)
+                    card_summary_html = (
+                        '<div class="savings-summary-card">'
+                        f"{card_rows_html}"
+                        '<div class="savings-total-row">'
+                        '<div class="savings-total-label">Total</div>'
+                        f'<div class="savings-total-value">$ {total_credit_spent:,.0f}</div>'
+                        "</div>"
+                        "</div>"
                     )
+                    st.markdown(card_summary_html, unsafe_allow_html=True)
+                    st.caption(
+                        "Amounts include credit-card transactions recorded in this selected month."
+                    )
+
+            with card_chart_col:
+                st.markdown(
+                    '<div class="panel-header">Spending By Subcategory</div>',
+                    unsafe_allow_html=True,
+                )
+                if not credit_breakdown:
+                    st.info("No credit-card spending recorded this month.")
+                else:
+                    credit_palette = [
+                        "#fef3c7",
+                        "#fde68a",
+                        "#fcd34d",
+                        "#fbbf24",
+                        "#f59e0b",
+                        "#d97706",
+                        "#b45309",
+                        "#92400e",
+                    ]
+                    credit_chart = (
+                        alt.Chart(alt.Data(values=credit_breakdown))
+                        .mark_bar(
+                            cornerRadiusTopLeft=6,
+                            cornerRadiusTopRight=6,
+                            size=48,
+                        )
+                        .encode(
+                            x=alt.X(
+                                "credit_card_name:N",
+                                title=None,
+                                axis=alt.Axis(
+                                    labelAngle=0,
+                                    labelColor="#d1d5db",
+                                    labelFontSize=12,
+                                    tickSize=0,
+                                    domain=False,
+                                ),
+                            ),
+                            y=alt.Y(
+                                "spent:Q",
+                                title=None,
+                                axis=alt.Axis(
+                                    format="~s",
+                                    labelColor="#9ca3af",
+                                    labelFontSize=11,
+                                    gridColor="rgba(255,255,255,0.08)",
+                                    tickSize=0,
+                                    domain=False,
+                                ),
+                            ),
+                            color=alt.Color(
+                                "subcategory:N",
+                                title=None,
+                                scale=alt.Scale(range=credit_palette),
+                                legend=alt.Legend(
+                                    orient="bottom",
+                                    direction="horizontal",
+                                    labelColor="#d1d5db",
+                                    labelFontSize=11,
+                                    symbolType="circle",
+                                    symbolSize=90,
+                                    title=None,
+                                ),
+                            ),
+                            order=alt.Order("spent:Q", sort="descending"),
+                            tooltip=[
+                                alt.Tooltip("credit_card_name:N", title="Credit card"),
+                                alt.Tooltip("subcategory:N", title="Subcategory"),
+                                alt.Tooltip("spent:Q", title="Spent", format=",.2f"),
+                            ],
+                        )
+                        .properties(width=560, height=320)
+                        .configure_view(strokeWidth=0)
+                        .configure_axis(labelFont="sans-serif", titleFont="sans-serif")
+                    )
+                    credit_left, credit_center, credit_right = st.columns([1, 6, 1])
+                    with credit_center:
+                        st.altair_chart(credit_chart, use_container_width=False)
 
         if status == "open":
             st.divider()
@@ -1028,6 +1437,28 @@ with trx_tab:
                 }
                 for c in cards_for_month
             }
+            savings_accounts_for_month = get_active_savings_accounts_for_month(
+                selected_month
+            )
+            savings_label_map = {
+                (
+                    f"{s['name']} · {s['account_type'].title()}"
+                    + (
+                        f" · linked {s['linked_bank_account_name']}"
+                        if s["linked_bank_account_name"]
+                        else ""
+                    )
+                ): s["id"]
+                for s in savings_accounts_for_month
+            }
+            savings_options = ["—"] + list(savings_label_map.keys())
+            savings_meta_map = {
+                s["id"]: {
+                    "linked_bank_account_id": s["linked_bank_account_id"],
+                    "linked_bank_account_name": s["linked_bank_account_name"],
+                }
+                for s in savings_accounts_for_month
+            }
 
             CATEGORY_LABELS = {
                 "Income": "Income",
@@ -1048,6 +1479,10 @@ with trx_tab:
                 )
                 amount = st.number_input("Amount", min_value=0.0, step=1.0)
                 payment_method = st.selectbox("Payment method", ["Debit", "Credit card"])
+                debit_funding_source = st.selectbox(
+                    "Debit funding source",
+                    ["Bank account", "Savings account"],
+                )
                 bank_account_label = st.selectbox(
                     "Bank account (for income/debit)",
                     options=account_options,
@@ -1055,6 +1490,10 @@ with trx_tab:
                 credit_card_label = st.selectbox(
                     "Credit card (for credit card purchases)",
                     options=card_options,
+                )
+                savings_account_label = st.selectbox(
+                    "Savings / investment account",
+                    options=savings_options,
                 )
                 note = st.text_input("Note (optional)")
                 submitted = st.form_submit_button("Add transaction")
@@ -1079,6 +1518,9 @@ with trx_tab:
                 else:
                     bank_account_id = account_label_map.get(bank_account_label)
                     credit_card_id = card_label_map.get(credit_card_label)
+                    savings_account_id = savings_label_map.get(savings_account_label)
+                    savings_meta = savings_meta_map.get(savings_account_id, {})
+                    settlement_bank_account_id = savings_meta.get("linked_bank_account_id")
                     statement_month_id = None
                     due_month_id = None
                     due_date = None
@@ -1088,12 +1530,41 @@ with trx_tab:
                         if bank_account_id is None:
                             st.error("Income must be assigned to a bank account.")
                             is_valid = False
-                    else:
-                        if payment_method == "Debit" and bank_account_id is None:
+                    elif category == "Savings":
+                        if payment_method != "Debit":
+                            st.error("Savings entries must use debit.")
+                            is_valid = False
+                        if bank_account_id is None:
                             st.error(
-                                "Debit transactions must be assigned to a bank account."
+                                "Savings entries must be assigned to a bank account."
                             )
                             is_valid = False
+                        if savings_account_id is None:
+                            st.error(
+                                "Savings entries must select a savings or investment account."
+                            )
+                            is_valid = False
+                    else:
+                        if payment_method == "Debit":
+                            if debit_funding_source == "Bank account" and bank_account_id is None:
+                                st.error(
+                                    "Debit transactions must be assigned to a bank account."
+                                )
+                                is_valid = False
+                            if debit_funding_source == "Savings account":
+                                if savings_account_id is None:
+                                    st.error(
+                                        "Savings-funded debit transactions must select a savings or investment account."
+                                    )
+                                    is_valid = False
+                                elif settlement_bank_account_id is None:
+                                    linked_name = savings_meta.get("linked_bank_account_name")
+                                    st.error(
+                                        "The selected savings account is missing a linked bank account. "
+                                        "Update it in Settings before using it as a funding source."
+                                        + (f" Current linked bank: {linked_name}." if linked_name else "")
+                                    )
+                                    is_valid = False
                         if payment_method == "Credit card" and credit_card_id is None:
                             st.error(
                                 "Credit card transactions must select a credit card."
@@ -1118,22 +1589,18 @@ with trx_tab:
 
                     if is_valid:
                         subcategory = subcategory or None
-                        signed_amount = amount if category == "Income" else -amount
 
                         if category == "Income":
-                            add_transaction(
-                                date=tx_date.isoformat(),
-                                month_id=selected_month,
-                                amount=signed_amount,
-                                category=category,
-                                subcategory=subcategory,
-                                payment_method=None,
-                                bank_account_id=bank_account_id,
-                                credit_card_id=None,
-                                statement_month_id=None,
-                                due_month_id=None,
-                                due_date=None,
-                                note=note,
+                            submit_budget_transaction(
+                                {
+                                    "date": tx_date.isoformat(),
+                                    "month_id": selected_month,
+                                    "amount": amount,
+                                    "category": category,
+                                    "subcategory": subcategory,
+                                    "bank_account_id": bank_account_id,
+                                    "note": note,
+                                }
                             )
                             st.success("Income transaction added.")
                             st.rerun()
@@ -1146,11 +1613,14 @@ with trx_tab:
                                 st.session_state.pending_tx = {
                                     "date": tx_date.isoformat(),
                                     "month_id": selected_month,
-                                    "amount": signed_amount,
+                                    "amount": amount,
                                     "category": category,
                                     "subcategory": subcategory,
                                     "payment_method": payment_method,
+                                    "debit_funding_source": debit_funding_source,
                                     "bank_account_id": bank_account_id,
+                                    "savings_account_id": savings_account_id,
+                                    "settlement_bank_account_id": settlement_bank_account_id,
                                     "credit_card_id": credit_card_id,
                                     "statement_month_id": statement_month_id,
                                     "due_month_id": due_month_id,
@@ -1160,29 +1630,26 @@ with trx_tab:
                                     "simulated": simulated,
                                 }
                             else:
-                                add_transaction(
-                                    date=tx_date.isoformat(),
-                                    month_id=selected_month,
-                                    amount=signed_amount,
-                                    category=category,
-                                    subcategory=subcategory,
-                                    payment_method=payment_method.lower().replace(" ", "_"),
-                                    bank_account_id=bank_account_id
-                                    if payment_method == "Debit"
-                                    else None,
-                                    credit_card_id=credit_card_id
-                                    if payment_method == "Credit card"
-                                    else None,
-                                    statement_month_id=statement_month_id
-                                    if payment_method == "Credit card"
-                                    else None,
-                                    due_month_id=due_month_id
-                                    if payment_method == "Credit card"
-                                    else None,
-                                    due_date=due_date.isoformat()
-                                    if payment_method == "Credit card" and due_date
-                                    else None,
-                                    note=note,
+                                submit_budget_transaction(
+                                    {
+                                        "date": tx_date.isoformat(),
+                                        "month_id": selected_month,
+                                        "amount": amount,
+                                        "category": category,
+                                        "subcategory": subcategory,
+                                        "payment_method": payment_method,
+                                        "debit_funding_source": debit_funding_source,
+                                        "bank_account_id": bank_account_id,
+                                        "savings_account_id": savings_account_id,
+                                        "settlement_bank_account_id": settlement_bank_account_id,
+                                        "credit_card_id": credit_card_id,
+                                        "statement_month_id": statement_month_id,
+                                        "due_month_id": due_month_id,
+                                        "due_date": due_date.isoformat()
+                                        if due_date
+                                        else None,
+                                        "note": note,
+                                    }
                                 )
                                 st.success("Transaction added.")
                                 st.rerun()
@@ -1199,20 +1666,7 @@ with trx_tab:
                 if c1.button("Cancel"):
                     st.session_state.pending_tx = None
                 if c2.button("Continue anyway"):
-                    add_transaction(
-                        date=pending["date"],
-                        month_id=pending["month_id"],
-                        amount=pending["amount"],
-                        category=pending["category"],
-                        subcategory=pending["subcategory"],
-                        payment_method=pending["payment_method"].lower().replace(" ", "_"),
-                        bank_account_id=pending.get("bank_account_id"),
-                        credit_card_id=pending.get("credit_card_id"),
-                        statement_month_id=pending.get("statement_month_id"),
-                        due_month_id=pending.get("due_month_id"),
-                        due_date=pending.get("due_date"),
-                        note=pending["note"],
-                    )
+                    submit_budget_transaction(pending)
                     st.session_state.pending_tx = None
                     st.success("Transaction added.")
                     st.rerun()
@@ -1230,13 +1684,16 @@ with trx_tab:
             card_name_map = {
                 c["id"]: c["name"] for c in get_credit_cards()
             }
+            savings_name_map = {
+                s["id"]: s["name"] for s in get_savings_accounts()
+            }
 
             filter_col, group_col = st.columns(2)
             with filter_col:
                 filter_labels = st.multiselect(
                     "Filter by category",
-                    options=["Fixed", "Variable", "Savings", "Income"],
-                    default=["Fixed", "Variable", "Savings", "Income"],
+                    options=["Fixed", "Variable", "Savings", "Income", "Transfer"],
+                    default=["Fixed", "Variable", "Savings", "Income", "Transfer"],
                 )
             if filter_labels:
                 transactions = [
@@ -1269,6 +1726,9 @@ with trx_tab:
                             ),
                             "Credit card": card_name_map.get(
                                 tx["credit_card_id"], "—"
+                            ),
+                            "Savings account": savings_name_map.get(
+                                tx["savings_account_id"], "—"
                             ),
                             "Note": tx["note"] or "",
                         }
@@ -1320,10 +1780,11 @@ with settings_tab:
         "Start here 👋\n\n"
         "1. Add your bank accounts\n"
         "2. Add your credit cards\n"
-        "3. Define your fixed expenses\n"
-        "4. Add your income sources\n"
-        "5. Set your budget objectives\n"
-        "6. Then initialize your first month from the Dashboard"
+        "3. Add your savings / investment accounts\n"
+        "4. Define your fixed expenses\n"
+        "5. Add your income sources\n"
+        "6. Set your budget objectives\n"
+        "7. Then initialize your first month from the Dashboard"
     )
     if not can_delete_for_selected_month:
         st.warning(
@@ -1332,8 +1793,15 @@ with settings_tab:
             "before initializing the selected month."
         )
 
-    bank_tab, card_tab, fixed_tab, income_tab, objectives_tab = st.tabs(
-        ["Bank Accounts", "Credit Cards", "Fixed Expenses", "Income", "Budget Objectives"]
+    bank_tab, card_tab, savings_tab, fixed_tab, income_tab, objectives_tab = st.tabs(
+        [
+            "Bank Accounts",
+            "Credit Cards",
+            "Savings & Investments",
+            "Fixed Expenses",
+            "Income",
+            "Budget Objectives",
+        ]
     )
 
     # ---------------- Bank accounts ----------------
@@ -1533,6 +2001,195 @@ with settings_tab:
                         1 if active else 0,
                     )
                     st.success("Credit card created.")
+                st.rerun()
+
+    # ---------------- Savings accounts ----------------
+    with savings_tab:
+        st.markdown("### Savings & Investment Accounts")
+        st.info(
+            "Use these accounts to track long-term balances and fund expenses "
+            "directly from savings. Link a bank account if you want savings-funded "
+            "debit expenses to create the transfer automatically."
+        )
+
+        accounts = get_bank_accounts()
+        account_label_map = {
+            f"{a['name']} (id {a['id']})": a["id"] for a in accounts
+        }
+        account_options = ["—"] + list(account_label_map.keys())
+
+        savings_accounts = get_savings_accounts()
+        if savings_accounts:
+            for savings in savings_accounts:
+                c1, c2, c3, c4, c5, c6, c7, c8 = st.columns(
+                    [2.5, 1.6, 1.6, 2.2, 1.7, 1.7, 1, 1]
+                )
+                c1.write(savings["name"])
+                c2.write(savings["institution"] or "—")
+                c3.write(str(savings["account_type"]).title())
+                c4.write(savings["linked_bank_account_name"] or "—")
+                c5.write(savings["effective_from_month_id"])
+                c6.write(savings["effective_to_month_id"] or "—")
+                if c7.button("Edit", key=f"edit_savings_{savings['id']}"):
+                    st.session_state.editing_savings_account = dict(savings)
+                if c8.button("Deactivate", key=f"deact_savings_{savings['id']}"):
+                    deactivate_savings_account(savings["id"])
+                    st.session_state.editing_savings_account = None
+                    st.success("Savings account deactivated.")
+                    st.rerun()
+        else:
+            st.info("No savings or investment accounts yet.")
+
+        st.divider()
+        st.markdown("#### Add / Edit Savings Account")
+
+        savings = st.session_state.editing_savings_account or {}
+        with st.form("savings_account_form"):
+            name = st.text_input("Name", value=savings.get("name", ""))
+            institution = st.text_input(
+                "Institution (optional)", value=savings.get("institution", "") or ""
+            )
+            account_type = st.selectbox(
+                "Account type",
+                options=["savings", "tfsa", "rrsp", "investment", "other"],
+                index=[
+                    "savings",
+                    "tfsa",
+                    "rrsp",
+                    "investment",
+                    "other",
+                ].index(savings.get("account_type", "savings")),
+            )
+            default_linked_account = None
+            if savings.get("linked_bank_account_id"):
+                for label, acct_id in account_label_map.items():
+                    if acct_id == savings["linked_bank_account_id"]:
+                        default_linked_account = label
+                        break
+            linked_bank_account_label = st.selectbox(
+                "Linked bank account (optional)",
+                options=account_options,
+                index=account_options.index(default_linked_account)
+                if default_linked_account in account_options
+                else 0,
+            )
+            effective_from = st.text_input(
+                "Effective from (YYYY-MM)",
+                value=savings.get("effective_from_month_id", current_month_id()),
+            )
+            effective_to = st.text_input(
+                "Effective to (YYYY-MM, optional)",
+                value=savings.get("effective_to_month_id") or "",
+            )
+            active = st.checkbox("Active", value=bool(savings.get("active", 1)))
+            submitted = st.form_submit_button("Save")
+
+        if submitted:
+            effective_to_val = effective_to.strip() or None
+            linked_bank_account_id = account_label_map.get(linked_bank_account_label)
+            if not name:
+                st.error("Name is required.")
+            elif not is_valid_month_id(effective_from):
+                st.error("Effective from must be in YYYY-MM format.")
+            elif effective_to_val and not is_valid_month_id(effective_to_val):
+                st.error("Effective to must be in YYYY-MM format.")
+            elif effective_to_val and effective_to_val < effective_from:
+                st.error("Effective to must be after effective from.")
+            else:
+                if savings.get("id"):
+                    update_savings_account(
+                        savings["id"],
+                        name.strip(),
+                        institution.strip() or None,
+                        account_type,
+                        linked_bank_account_id,
+                        effective_from,
+                        effective_to_val,
+                        1 if active else 0,
+                    )
+                    st.session_state.editing_savings_account = None
+                    st.success("Savings account updated.")
+                else:
+                    create_savings_account(
+                        name.strip(),
+                        institution.strip() or None,
+                        account_type,
+                        linked_bank_account_id,
+                        effective_from,
+                        effective_to_val,
+                        1 if active else 0,
+                    )
+                    st.success("Savings account created.")
+                st.rerun()
+
+        st.divider()
+        st.markdown("#### Record Opening Balance")
+        st.caption(
+            "Use this to backfill money that existed before you started tracking "
+            "this app. It affects savings balances only and does not count as "
+            "monthly income or a savings contribution."
+        )
+
+        active_savings_accounts = [
+            s for s in get_savings_accounts() if s["active"]
+        ]
+        opening_balance_label_map = {
+            f"{s['name']} (id {s['id']})": s["id"] for s in active_savings_accounts
+        }
+        opening_balance_options = list(opening_balance_label_map.keys())
+        with st.form("savings_opening_balance_form"):
+            if opening_balance_options:
+                opening_balance_label = st.selectbox(
+                    "Savings / investment account",
+                    options=opening_balance_options,
+                )
+            else:
+                opening_balance_label = None
+                st.warning("Create a savings or investment account first.")
+            opening_balance_date = st.date_input("Opening balance date")
+            opening_balance_amount = st.number_input(
+                "Opening balance amount",
+                min_value=0.0,
+                step=100.0,
+            )
+            opening_balance_note = st.text_input(
+                "Note",
+                value="Opening balance before app tracking",
+            )
+            submitted_opening_balance = st.form_submit_button(
+                "Record opening balance"
+            )
+
+        if submitted_opening_balance:
+            savings_account_id = (
+                opening_balance_label_map.get(opening_balance_label)
+                if opening_balance_label
+                else None
+            )
+            opening_month_id = (
+                f"{opening_balance_date.year}-{opening_balance_date.month:02d}"
+            )
+            if savings_account_id is None:
+                st.error("Select a savings or investment account.")
+            elif opening_balance_amount <= 0:
+                st.error("Opening balance amount must be greater than zero.")
+            elif not month_exists(opening_month_id):
+                st.error(
+                    "The opening balance month must be initialized first. "
+                    f"Initialize {opening_month_id} from the Dashboard or choose "
+                    "a date in an initialized month."
+                )
+            else:
+                add_savings_movement(
+                    date=opening_balance_date.isoformat(),
+                    month_id=opening_month_id,
+                    savings_account_id=savings_account_id,
+                    amount=opening_balance_amount,
+                    movement_type="opening_balance",
+                    linked_transaction_id=None,
+                    note=opening_balance_note,
+                )
+                st.success("Opening balance recorded.")
                 st.rerun()
 
     # ---------------- Fixed expenses ----------------

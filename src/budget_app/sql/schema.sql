@@ -39,6 +39,23 @@ CREATE TABLE IF NOT EXISTS credit_cards (
 );
 
 -- =========================
+-- Savings / Investment Accounts (Master Data)
+-- =========================
+CREATE TABLE IF NOT EXISTS savings_accounts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    institution TEXT,
+    account_type TEXT NOT NULL DEFAULT 'savings',
+    linked_bank_account_id INTEGER,
+    active INTEGER NOT NULL DEFAULT 1,
+    effective_from_month_id TEXT NOT NULL,
+    effective_to_month_id TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+
+    FOREIGN KEY (linked_bank_account_id) REFERENCES bank_accounts (id)
+);
+
+-- =========================
 -- Account Balances (Per Month)
 -- =========================
 CREATE TABLE IF NOT EXISTS account_month_balances (
@@ -65,6 +82,7 @@ CREATE TABLE IF NOT EXISTS transactions (
     payment_method TEXT,
     bank_account_id INTEGER,
     credit_card_id INTEGER,
+    savings_account_id INTEGER,
     statement_month_id TEXT,
     due_month_id TEXT,
     due_date TEXT,
@@ -74,11 +92,35 @@ CREATE TABLE IF NOT EXISTS transactions (
 
     FOREIGN KEY (month_id) REFERENCES months (month_id),
     FOREIGN KEY (bank_account_id) REFERENCES bank_accounts (id),
-    FOREIGN KEY (credit_card_id) REFERENCES credit_cards (id)
+    FOREIGN KEY (credit_card_id) REFERENCES credit_cards (id),
+    FOREIGN KEY (savings_account_id) REFERENCES savings_accounts (id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_transactions_month
 ON transactions (month_id);
+
+-- =========================
+-- Savings Movements
+-- =========================
+CREATE TABLE IF NOT EXISTS savings_movements (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    date TEXT NOT NULL,
+    month_id TEXT NOT NULL,
+    savings_account_id INTEGER NOT NULL,
+    amount REAL NOT NULL,
+    movement_type TEXT NOT NULL
+        CHECK (movement_type IN ('opening_balance', 'contribution', 'withdrawal')),
+    linked_transaction_id INTEGER,
+    note TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+
+    FOREIGN KEY (month_id) REFERENCES months (month_id),
+    FOREIGN KEY (savings_account_id) REFERENCES savings_accounts (id),
+    FOREIGN KEY (linked_transaction_id) REFERENCES transactions (id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_savings_movements_account_date
+ON savings_movements (savings_account_id, date);
 
 
 -- =========================
